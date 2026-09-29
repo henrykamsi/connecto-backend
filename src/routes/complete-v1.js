@@ -1,3 +1,4 @@
+const { v4: uuidv4 } = require('uuid');
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -17,8 +18,8 @@ const router = express.Router();
 function accessToken(userId,sessionId) {
   return jwt.sign(
     {sub:userId,sessionId,type:'access'},
-    env.jwtSecret,
-    {expiresIn:env.jwtExpiresIn}
+    env.jwt.secret,
+    {expiresIn:env.jwt.expiresIn}
   );
 }
 
@@ -40,12 +41,14 @@ function cleanUsername(value) {
 }
 
 async function createSession(userId,req,body={}) {
-  const result = await query(
+  const sessionId = uuidv4();
+
+  await query(
     `INSERT INTO sessions
-     (user_id,device_type,device_model,os_version,app_version,ip_address)
-     VALUES($1,$2,$3,$4,$5,$6)
-     RETURNING id`,
+     (id,user_id,device_type,device_model,os_version,app_version,ip_address)
+     VALUES($1,$2,$3,$4,$5,$6,$7)`,
     [
+      sessionId,
       userId,
       body.deviceType || null,
       body.deviceName || body.deviceId || null,
@@ -55,16 +58,17 @@ async function createSession(userId,req,body={}) {
     ]
   );
 
-  const sessionId = result.rows[0].id;
   const refresh = refreshToken();
 
   await query(
     `INSERT INTO refresh_tokens
-     (user_id,token_hash,device_id,device_name,device_type,os_version,
-      app_version,ip_address,user_agent,expires_at)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+     (id,user_id,session_id,token_hash,device_id,device_name,device_type,
+      os_version,app_version,ip_address,user_agent,expires_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [
+      uuidv4(),
       userId,
+      sessionId,
       hashSecret(refresh),
       body.deviceId || null,
       body.deviceName || null,
@@ -73,7 +77,7 @@ async function createSession(userId,req,body={}) {
       body.appVersion || null,
       req.ip,
       req.headers['user-agent'] || null,
-      expiryDate(env.refreshDays)
+      expiryDate(env.jwt.refreshTokenExpiresDays).toISOString()
     ]
   );
 
@@ -97,7 +101,7 @@ router.get('/health',(req,res)=>{
 });
 
 router.get('/health/db',async(req,res)=>{
-  const r = await query('SELECT NOW() AS server_time');
+  const r = await query('SELECT CURRENT_TIMESTAMP AS server_time');
   res.json({
     success:true,
     database:'connected',
@@ -109,7 +113,7 @@ router.get('/providers/status',async(req,res)=>{
   res.json({
     success:true,
     providers:{
-      postgres:true,
+      turso:true,
       fcm:!!(
         env.fcm.projectId &&
         env.fcm.clientEmail &&
@@ -131,7 +135,7 @@ router.post('/auth/register',async(req,res,next)=>{
       surname:z.string().min(1).max(80),
       email:z.string().email(),
       password:z.string().min(8),
-      mobile:z.string().max(40).optional()
+      mobile:z.string().max(40).optional().or(z.literal(""))
     });
 
     const data = schema.parse(req.body);
@@ -139,7 +143,7 @@ router.post('/auth/register',async(req,res,next)=>{
     const exists = await query(
       `SELECT id FROM users
        WHERE lower(email)=lower($1)
-          OR ($2::text IS NOT NULL AND mobile=$2)
+          OR ($2 IS NOT NULL AND mobile=$2)
        LIMIT 1`,
       [data.email,data.mobile || null]
     );
@@ -152,16 +156,39 @@ router.post('/auth/register',async(req,res,next)=>{
     }
 
     const passwordHash = await bcrypt.hash(data.password,12);
+    const userId = uuidv4();
+
+    const baseUsername = cleanUsername(
+      `${data.name}_${data.surname}`
+    ).slice(0,40) || "user";
+
+    let username = baseUsername;
+    let suffix = 1;
+
+    while (true) {
+      const usernameCheck = await query(
+        `SELECT id FROM users
+         WHERE lower(username)=lower($1)
+         LIMIT 1`,
+        [username]
+      );
+
+      if (!usernameCheck.rows.length) break;
+
+      username = `${baseUsername}_${suffix++}`;
+    }
 
     const user = await query(
       `INSERT INTO users
-       (name,surname,email,password_hash,mobile,account_status)
-       VALUES($1,$2,$3,$4,$5,'active')
-       RETURNING id,name,surname,email,mobile,created_at`,
+       (id,first_name,surname,email,username,password_hash,mobile,account_status)
+       VALUES($1,$2,$3,$4,$5,$6,$7,'active')
+       RETURNING id,first_name,surname,email,username,mobile,created_at`,
       [
+        userId,
         data.name,
         data.surname,
         data.email.toLowerCase(),
+        username,
         passwordHash,
         data.mobile || null
       ]
@@ -194,12 +221,19 @@ router.post('/auth/register',async(req,res,next)=>{
 
 router.post('/auth/login',async(req,res,next)=>{
   try {
-    const identifier = String(req.body.email || req.body.username || '').trim();
+    const identifier = String(
+      req.body.identifier ||
+      req.body.email ||
+      req.body.username ||
+      req.body.mobile ||
+      ''
+    ).trim();
 
     const result = await query(
       `SELECT * FROM users
        WHERE lower(email)=lower($1)
           OR lower(username)=lower($1)
+          OR mobile=$1
        LIMIT 1`,
       [identifier]
     );
@@ -234,13 +268,13 @@ router.post('/auth/login',async(req,res,next)=>{
       [
         user.id,
         req.ip,
-        {
+        JSON.stringify({
           deviceId:req.body.deviceId || null,
           deviceType:req.body.deviceType || null,
           deviceName:req.body.deviceName || null,
           osVersion:req.body.osVersion || null,
           appVersion:req.body.appVersion || null
-        }
+        })
       ]
     );
 
@@ -248,7 +282,7 @@ router.post('/auth/login',async(req,res,next)=>{
       success:true,
       user:{
         id:user.id,
-        name:user.name,
+        name:user.first_name,
         surname:user.surname,
         email:user.email,
         username:user.username
@@ -275,7 +309,7 @@ router.post('/auth/refresh',async(req,res)=>{
     `SELECT * FROM refresh_tokens
      WHERE token_hash=$1
        AND revoked_at IS NULL
-       AND expires_at>NOW()
+       AND expires_at>CURRENT_TIMESTAMP
      LIMIT 1`,
     [hashSecret(raw)]
   );
@@ -290,7 +324,7 @@ router.post('/auth/refresh',async(req,res)=>{
   const row = result.rows[0];
 
   await query(
-    `UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=$1`,
+    `UPDATE refresh_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE id=$1`,
     [row.id]
   );
 
@@ -305,20 +339,24 @@ router.post('/auth/refresh',async(req,res)=>{
   res.json({success:true,...session});
 });
 
-router.post('/auth/logout',auth,async(req,res)=>{
-  await query(
-    `UPDATE refresh_tokens SET revoked_at=NOW()
-     WHERE user_id=$1 AND revoked_at IS NULL`,
-    [req.user.id]
-  );
+router.post('/auth/logout',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `UPDATE refresh_tokens SET revoked_at=CURRENT_TIMESTAMP
+       WHERE user_id=$1 AND revoked_at IS NULL`,
+      [req.user.id]
+    );
 
-  await query(
-    `UPDATE sessions SET revoked_at=NOW()
-     WHERE user_id=$1 AND revoked_at IS NULL`,
-    [req.user.id]
-  );
+    await query(
+      `UPDATE sessions SET revoked_at=CURRENT_TIMESTAMP
+       WHERE user_id=$1 AND revoked_at IS NULL`,
+      [req.user.id]
+    );
 
-  res.json({success:true});
+    res.json({success:true});
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.get('/auth/me',auth,(req,res)=>{
@@ -380,10 +418,10 @@ router.post('/profile/complete',auth,async(req,res,next)=>{
            country=$4,
            state=$5,
            gender=$6,
-           updated_at=NOW()
+           updated_at=CURRENT_TIMESTAMP
        WHERE id=$7
-       RETURNING id,name,surname,email,username,bio,category,country,state,gender,
-                 profile_photo_url,cover_photo_url`,
+       RETURNING id,first_name,surname,email,username,bio,category,country,state,gender,
+                 profile_photo_media_id,cover_photo_media_id`,
       [
         username,
         req.body.bio || null,
@@ -413,8 +451,8 @@ router.patch('/profile',auth,async(req,res,next)=>{
       'country',
       'state',
       'gender',
-      'profile_photo_url',
-      'cover_photo_url'
+      'profile_photo_media_id',
+      'cover_photo_media_id'
     ];
 
     const fields=[];
@@ -438,10 +476,10 @@ router.patch('/profile',auth,async(req,res,next)=>{
     values.push(req.user.id);
 
     const result = await query(
-      `UPDATE users SET ${fields.join(',')},updated_at=NOW()
+      `UPDATE users SET ${fields.join(',')},updated_at=CURRENT_TIMESTAMP
        WHERE id=$${n}
-       RETURNING id,name,surname,email,username,bio,category,country,state,gender,
-                 profile_photo_url,cover_photo_url`,
+       RETURNING id,first_name,surname,email,username,bio,category,country,state,gender,
+                 profile_photo_media_id,cover_photo_media_id`,
       values
     );
 
@@ -466,13 +504,13 @@ router.get('/users/search',auth,async(req,res,next)=>{
 
     const result = await query(
       `SELECT id,name,surname,username,bio,category,country,state,gender,
-              profile_photo_url
+              profile_photo_media_id
        FROM users
        WHERE account_status='active'
          AND id<>$1
-         AND ($2='' OR name ILIKE '%'||$2||'%' OR surname ILIKE '%'||$2||'%' OR username ILIKE '%'||$2||'%')
-         AND ($3::text IS NULL OR country=$3)
-         AND ($4::text IS NULL OR gender=$4)
+         AND ($2='' OR name LIKE '%'||$2||'%' OR surname LIKE '%'||$2||'%' OR username LIKE '%'||$2||'%')
+         AND ($3 IS NULL OR country=$3)
+         AND ($4 IS NULL OR gender=$4)
        ORDER BY created_at DESC
        LIMIT $5`,
       [req.user.id,q,country,gender,limit]
@@ -505,7 +543,7 @@ router.post('/social/follow/:userId',auth,async(req,res,next)=>{
       actorId:req.user.id,
       type:'USER_FOLLOWED',
       title:'New follower',
-      body:`${req.user.name} started following you`,
+      body:`${req.user.first_name} started following you`,
       targetType:'user',
       targetId:req.user.id
     });
@@ -543,7 +581,7 @@ router.post('/social/friend-request/:userId',auth,async(req,res,next)=>{
       actorId:req.user.id,
       type:'FRIEND_REQUESTED',
       title:'Friend request',
-      body:`${req.user.name} sent you a friend request`,
+      body:`${req.user.first_name} sent you a friend request`,
       targetType:'user',
       targetId:req.user.id
     });
@@ -572,13 +610,13 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
     const r = request.rows[0];
 
     await query(
-      `UPDATE friend_requests SET status='accepted',updated_at=NOW()
+      `UPDATE friend_requests SET status='accepted',updated_at=CURRENT_TIMESTAMP
        WHERE id=$1`,
       [r.id]
     );
 
     await query(
-      `INSERT INTO friendships(user_id,friend_id)
+      `INSERT INTO friendships(user_a_id,user_b_id)
        VALUES($1,$2),($2,$1)
        ON CONFLICT DO NOTHING`,
       [r.sender_id,r.receiver_id]
@@ -589,7 +627,7 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
       actorId:req.user.id,
       type:'FRIEND_ACCEPTED',
       title:'Friend request accepted',
-      body:`${req.user.name} accepted your friend request`,
+      body:`${req.user.first_name} accepted your friend request`,
       targetType:'user',
       targetId:req.user.id
     });
@@ -605,7 +643,7 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
 router.post('/posts',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `INSERT INTO posts(user_id,body,visibility,comments_enabled,share_enabled)
+      `INSERT INTO posts(author_id,text,audience,comments_enabled,share_enabled)
        VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
@@ -634,11 +672,11 @@ router.get('/feed',auth,async(req,res,next)=>{
     const result = await query(
       `SELECT
          p.*,
-         u.name,u.surname,u.username,u.profile_photo_url,
+         u.first_name,u.surname,u.username,u.profile_photo_media_id,
          COALESCE(rc.reaction_count,0) reaction_count,
          COALESCE(cc.comment_count,0) comment_count
        FROM posts p
-       JOIN users u ON u.id=p.user_id
+       JOIN users u ON u.id=p.author_id
        LEFT JOIN (
          SELECT post_id,COUNT(*) reaction_count
          FROM reactions GROUP BY post_id
@@ -651,11 +689,11 @@ router.get('/feed',auth,async(req,res,next)=>{
        WHERE p.deleted_at IS NULL
          AND u.account_status='active'
          AND (
-           p.visibility='public'
-           OR p.user_id=$1
+           p.audience='public'
+           OR p.author_id=$1
            OR EXISTS(
              SELECT 1 FROM friendships f
-             WHERE f.user_id=$1 AND f.friend_id=p.user_id
+             WHERE f.user_id=$1 AND f.friend_id=p.author_id
            )
          )
        ORDER BY p.created_at DESC
@@ -678,10 +716,10 @@ router.post('/posts/:postId/reactions',auth,async(req,res,next)=>{
     const reaction = req.body.reaction || 'like';
 
     await query(
-      `INSERT INTO reactions(post_id,user_id,reaction)
+      `INSERT INTO reactions(post_id,user_id,type)
        VALUES($1,$2,$3)
        ON CONFLICT(post_id,user_id)
-       DO UPDATE SET reaction=EXCLUDED.reaction`,
+       DO UPDATE SET type=excluded.type`,
       [req.params.postId,req.user.id,reaction]
     );
 
@@ -715,7 +753,7 @@ router.post('/posts/:postId/comments',auth,async(req,res,next)=>{
     }
 
     const result = await query(
-      `INSERT INTO comments(post_id,user_id,parent_id,body)
+      `INSERT INTO comments(post_id,author_id,parent_comment_id,body)
        VALUES($1,$2,$3,$4)
        RETURNING *`,
       [
@@ -768,8 +806,8 @@ router.post('/chat/conversations',auth,async(req,res,next)=>{
     }
 
     const conversation = await query(
-      `INSERT INTO conversations(type)
-       VALUES('direct') RETURNING id`,
+      `INSERT INTO conversations(type,created_by)
+       VALUES('direct',$1) RETURNING id`,
       []
     );
 
@@ -828,11 +866,11 @@ router.get('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
     }
 
     const result = await query(
-      `SELECT m.*,u.name,u.surname,u.username,u.profile_photo_url
+      `SELECT m.*,u.first_name,u.surname,u.username,u.profile_photo_media_id
        FROM messages m
        JOIN users u ON u.id=m.sender_id
        WHERE m.conversation_id=$1
-       ORDER BY m.created_at ASC
+       ORDER BY m.sent_at ASC
        LIMIT 100`,
       [req.params.id]
     );
@@ -872,7 +910,7 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
     const inserted = await query(
       `INSERT INTO messages
-       (conversation_id,sender_id,body,message_type,reply_to_id)
+       (conversation_id,sender_id,body,message_type,reply_to_message_id)
        VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
@@ -895,7 +933,7 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
     if (!moderation.allowed) {
       await query(
         `UPDATE messages
-         SET deleted_at=NOW(),body=$1
+         SET deleted_at=CURRENT_TIMESTAMP,body=$1
          WHERE id=$2`,
         [moderation.replacement,message.id]
       );
@@ -908,7 +946,7 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
     }
 
     await query(
-      `UPDATE conversations SET updated_at=NOW()
+      `UPDATE conversations SET updated_at=CURRENT_TIMESTAMP
        WHERE id=$1`,
       [req.params.id]
     );
@@ -927,6 +965,13 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
 router.post('/calls',auth,async(req,res,next)=>{
   try {
+    if (!req.body.receiverId) {
+      return res.status(400).json({
+        success:false,
+        error:'receiverId required'
+      });
+    }
+
     const result = await query(
       `INSERT INTO calls
        (conversation_id,caller_id,receiver_id,type)
@@ -945,7 +990,7 @@ router.post('/calls',auth,async(req,res,next)=>{
       actorId:req.user.id,
       type:'CALL_RECEIVED',
       title:'Incoming call',
-      body:`${req.user.name} is calling you`,
+      body:`${req.user.first_name} is calling you`,
       targetType:'call',
       targetId:result.rows[0].id
     });
@@ -989,7 +1034,7 @@ router.post('/calls/:id/accept',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `UPDATE calls
-       SET status='accepted',accepted_at=NOW()
+       SET status='accepted',accepted_at=CURRENT_TIMESTAMP
        WHERE id=$1 AND receiver_id=$2
        RETURNING *`,
       [req.params.id,req.user.id]
@@ -1008,7 +1053,7 @@ router.post('/calls/:id/reject',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `UPDATE calls
-       SET status='rejected',ended_at=NOW()
+       SET status='rejected',ended_at=CURRENT_TIMESTAMP
        WHERE id=$1
        AND (receiver_id=$2 OR caller_id=$2)
        RETURNING *`,
@@ -1028,7 +1073,7 @@ router.post('/calls/:id/end',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `UPDATE calls
-       SET status='ended',ended_at=NOW()
+       SET status='ended',ended_at=CURRENT_TIMESTAMP
        WHERE id=$1
        AND (receiver_id=$2 OR caller_id=$2)
        RETURNING *`,
@@ -1088,8 +1133,8 @@ router.post('/blocks/:userId',auth,async(req,res,next)=>{
 
     await query(
       `DELETE FROM friendships
-       WHERE (user_id=$1 AND friend_id=$2)
-          OR (user_id=$2 AND friend_id=$1)`,
+       WHERE (user_a_id=$1 AND user_b_id=$2)
+          OR (user_a_id=$2 AND user_b_id=$1)`,
       [req.user.id,req.params.userId]
     );
 
@@ -1152,17 +1197,16 @@ router.post('/devices',auth,async(req,res,next)=>{
 
     await query(
       `INSERT INTO device_tokens
-       (user_id,fcm_token,device_id,platform,device_name,os_version,app_version)
+       (user_id,token,device_type,device_model,os_version,app_version)
        VALUES($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT(user_id,fcm_token)
+       ON CONFLICT(user_id,token)
        DO UPDATE SET
          active=true,
-         updated_at=NOW()`,
+         updated_at=CURRENT_TIMESTAMP`,
       [
         req.user.id,
         req.body.fcmToken,
-        req.body.deviceId || null,
-        req.body.platform || 'android',
+        req.body.deviceType || 'android',
         req.body.deviceName || null,
         req.body.osVersion || null,
         req.body.appVersion || null
@@ -1179,8 +1223,8 @@ router.delete('/devices/:token',auth,async(req,res,next)=>{
   try {
     await query(
       `UPDATE device_tokens
-       SET active=false,updated_at=NOW()
-       WHERE user_id=$1 AND fcm_token=$2`,
+       SET active=false,updated_at=CURRENT_TIMESTAMP
+       WHERE recipient_id=$1 AND token=$2`,
       [req.user.id,req.params.token]
     );
 
@@ -1196,7 +1240,7 @@ router.get('/notifications',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `SELECT * FROM notifications
-       WHERE user_id=$1
+       WHERE recipient_id=$1
        ORDER BY created_at DESC
        LIMIT 100`,
       [req.user.id]
@@ -1215,8 +1259,8 @@ router.post('/notifications/read-all',auth,async(req,res,next)=>{
   try {
     await query(
       `UPDATE notifications
-       SET read_at=COALESCE(read_at,NOW())
-       WHERE user_id=$1`,
+       SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP)
+       WHERE recipient_id=$1`,
       [req.user.id]
     );
 
@@ -1263,7 +1307,7 @@ router.get('/developer/api-keys',auth,async(req,res,next)=>{
     const result = await query(
       `SELECT id,name,key_prefix,last_used_at,created_at,revoked_at
        FROM api_keys
-       WHERE user_id=$1
+       WHERE recipient_id=$1
        ORDER BY created_at DESC`,
       [req.user.id]
     );
@@ -1281,7 +1325,7 @@ router.post('/developer/api-keys/:id/revoke',auth,async(req,res,next)=>{
   try {
     await query(
       `UPDATE api_keys
-       SET revoked_at=NOW()
+       SET revoked_at=CURRENT_TIMESTAMP
        WHERE id=$1 AND user_id=$2`,
       [req.params.id,req.user.id]
     );
@@ -1297,7 +1341,7 @@ router.post('/developer/api-keys/:id/revoke',auth,async(req,res,next)=>{
 router.get('/settings',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `SELECT * FROM user_settings WHERE user_id=$1`,
+      `SELECT * FROM user_settings WHERE recipient_id=$1`,
       [req.user.id]
     );
 
@@ -1352,7 +1396,7 @@ router.patch('/settings',auth,async(req,res,next)=>{
 
     const result = await query(
       `UPDATE user_settings
-       SET ${assignments.join(',')},updated_at=NOW()
+       SET ${assignments.join(',')},updated_at=CURRENT_TIMESTAMP
        WHERE user_id=$${n}
        RETURNING *`,
       values
@@ -1406,15 +1450,15 @@ router.post('/auth/change-password',auth,async(req,res,next)=>{
     const hash = await bcrypt.hash(req.body.newPassword,12);
 
     await query(
-      `UPDATE users SET password_hash=$1,updated_at=NOW()
+      `UPDATE users SET password_hash=$1,updated_at=CURRENT_TIMESTAMP
        WHERE id=$2`,
       [hash,req.user.id]
     );
 
     await query(
       `UPDATE refresh_tokens
-       SET revoked_at=NOW()
-       WHERE user_id=$1 AND revoked_at IS NULL`,
+       SET revoked_at=CURRENT_TIMESTAMP
+       WHERE recipient_id=$1 AND revoked_at IS NULL`,
       [req.user.id]
     );
 
