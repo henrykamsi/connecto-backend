@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+.DS_Store
+
+# Firebase service account
+*-firebase-adminsdk-*.json
+
+# Local environment backups
+.env.backup
+.env.backup.*
