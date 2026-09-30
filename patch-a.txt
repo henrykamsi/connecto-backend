@@ -1,0 +1,402 @@
+/* ============================================================
+   PATCH A — PART 1
+   Forgot password, dismiss-verify-prompt
+   Uses existing helpers already in server.js:
+     - cryptoA, sha256Hex, getProviderCredential, sendBrevoEmail
+   ==========================================================*/
+
+/* ---------- FORGOT PASSWORD ---------- */
+
+app.post("/api/v1/auth/forgot-password", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ success: false, error: "EMAIL_REQUIRED" });
+
+    const found = await query(
+      "SELECT id, first_name FROM users WHERE lower(email)=lower($1) LIMIT 1",
+      [email]
+    );
+    if (!found.rows.length) {
+      return res.json({ success: true, message: "If the email exists, a reset code was sent." });
+    }
+    const user = found.rows[0];
+
+    const recent = await query(
+      "SELECT COUNT(*) AS c FROM verification_codes WHERE user_id=$1 AND purpose='password_reset' AND created_at > datetime('now','-1 hour')",
+      [user.id]
+    );
+    if (Number(recent.rows[0].c || 0) >= 3) {
+      return res.status(429).json({ success: false, error: "RESEND_LIMIT_REACHED" });
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = cryptoA.createHash("sha256").update(code).digest("hex");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    await run(
+      "INSERT INTO verification_codes (id, user_id, channel, destination, code_hash, purpose, expires_at) VALUES ($1,$2,'email',$3,$4,'password_reset',$5)",
+      [uuidv4(), user.id, email, codeHash, expiresAt]
+    );
+
+    const html = buildVerificationEmail(code, user.first_name);
+    const result = await sendBrevoEmail(email, "Reset your Connecto password", html);
+
+    if (!result.sent) {
+      return res.status(502).json({ success: false, error: "EMAIL_SEND_FAILED", details: result });
+    }
+
+    res.json({ success: true, message: "If the email exists, a reset code was sent." });
+  } catch (err) {
+    console.error("[FORGOT-PASSWORD]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/auth/reset-password", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const bcrypt = require("bcryptjs");
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const code = String(req.body.code || "");
+    const newPassword = String(req.body.newPassword || "");
+
+    if (!email || !code || !newPassword) return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+    if (newPassword.length < 8) return res.status(400).json({ success: false, error: "PASSWORD_TOO_SHORT" });
+
+    const codeHash = cryptoA.createHash("sha256").update(code).digest("hex");
+
+    const r = await query(
+      "SELECT vc.*, u.id AS uid FROM verification_codes vc JOIN users u ON u.id = vc.user_id WHERE lower(vc.destination)=lower($1) AND vc.code_hash=$2 AND vc.purpose='password_reset' AND vc.used_at IS NULL AND vc.expires_at > CURRENT_TIMESTAMP ORDER BY vc.created_at DESC LIMIT 1",
+      [email, codeHash]
+    );
+    if (!r.rows.length) return res.status(400).json({ success: false, error: "INVALID_OR_EXPIRED_CODE" });
+
+    const row = r.rows[0];
+    const hash = await bcrypt.hash(newPassword, 12);
+
+    await run("UPDATE users SET password_hash=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2", [hash, row.uid]);
+    await run("UPDATE verification_codes SET used_at=CURRENT_TIMESTAMP WHERE id=$1", [row.id]);
+    await run("UPDATE refresh_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=$1 AND revoked_at IS NULL", [row.uid]);
+
+    res.json({ success: true, message: "Password reset successfully." });
+  } catch (err) {
+    console.error("[RESET-PASSWORD]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DISMISS VERIFY PROMPT (count Close taps) ---------- */
+
+app.post("/api/v1/auth/dismiss-verify-prompt", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    }
+    let userId = null;
+    try {
+      const payload = jwt.verify(authHeader.slice(7), envLocal.jwt.secret);
+      userId = payload.sub;
+    } catch (e) {
+      return res.status(401).json({ success: false, error: "INVALID_SESSION" });
+    }
+
+    await run(
+      "UPDATE users SET verify_prompt_dismissals = COALESCE(verify_prompt_dismissals,0) + 1, updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [userId]
+    );
+
+    const u = await query(
+      "SELECT verify_prompt_dismissals, verify_grace_started_at, email_verified FROM users WHERE id=$1",
+      [userId]
+    );
+    const row = u.rows[0] || {};
+
+    res.json({
+      success: true,
+      dismissals: Number(row.verify_prompt_dismissals || 0),
+      grace_started_at: row.verify_grace_started_at || null,
+      email_verified: Number(row.email_verified || 0)
+    });
+  } catch (err) {
+    console.error("[DISMISS-VERIFY-PROMPT]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ============================================================
+   PATCH A — PART 2
+   Biometric, Google, account deletion, background retry
+   ==========================================================*/
+
+/* ---------- BIOMETRIC ENABLE / DISABLE ---------- */
+
+app.post("/api/v1/auth/biometric/enable", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    let userId = null;
+    try {
+      const payload = jwt.verify(authHeader.slice(7), envLocal.jwt.secret);
+      userId = payload.sub;
+    } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const deviceId = String(req.body.deviceId || "").trim();
+    if (!deviceId) return res.status(400).json({ success: false, error: "DEVICE_ID_REQUIRED" });
+
+    await run(
+      "UPDATE users SET biometric_enabled=1, biometric_device_id=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2",
+      [deviceId, userId]
+    );
+
+    res.json({ success: true, message: "Biometric enabled." });
+  } catch (err) {
+    console.error("[BIOMETRIC-ENABLE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/auth/biometric/disable", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    let userId = null;
+    try {
+      const payload = jwt.verify(authHeader.slice(7), envLocal.jwt.secret);
+      userId = payload.sub;
+    } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run(
+      "UPDATE users SET biometric_enabled=0, biometric_device_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [userId]
+    );
+
+    res.json({ success: true, message: "Biometric disabled." });
+  } catch (err) {
+    console.error("[BIOMETRIC-DISABLE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- GOOGLE LOGIN ---------- */
+
+app.post("/api/v1/auth/google", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const cryptoLocal = require("crypto");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const idToken = String(req.body.idToken || "").trim();
+    if (!idToken) return res.status(400).json({ success: false, error: "ID_TOKEN_REQUIRED" });
+
+    const googleCred = await getProviderCredential("auth", "google");
+    const clientId = googleCred && googleCred.clientId;
+    if (!clientId) return res.status(503).json({ success: false, error: "GOOGLE_NOT_CONFIGURED" });
+
+    const verifyResp = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken));
+    if (!verifyResp.ok) return res.status(401).json({ success: false, error: "INVALID_GOOGLE_TOKEN" });
+    const info = await verifyResp.json();
+    if (info.aud !== clientId) return res.status(401).json({ success: false, error: "AUDIENCE_MISMATCH" });
+
+    const email = String(info.email || "").toLowerCase();
+    const googleId = String(info.sub || "");
+    if (!email || !googleId) return res.status(400).json({ success: false, error: "MISSING_GOOGLE_FIELDS" });
+
+    let userId = null;
+    let firstName = null;
+    let isNew = false;
+
+    const existing = await query(
+      "SELECT id, first_name FROM users WHERE lower(email)=lower($1) OR google_id=$2 LIMIT 1",
+      [email, googleId]
+    );
+
+    if (existing.rows.length) {
+      userId = existing.rows[0].id;
+      firstName = existing.rows[0].first_name;
+      await run("UPDATE users SET google_id=$1, email_verified=1, updated_at=CURRENT_TIMESTAMP WHERE id=$2", [googleId, userId]);
+    } else {
+      isNew = true;
+      userId = uuidv4();
+      firstName = String(info.given_name || "User").slice(0,80);
+      const surname = String(info.family_name || "Google").slice(0,80);
+      let base = (firstName + "_" + surname).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0,40) || "user";
+      let username = base;
+      let suffix = 1;
+      while (true) {
+        const check = await query("SELECT id FROM users WHERE lower(username)=lower($1) LIMIT 1", [username]);
+        if (!check.rows.length) break;
+        username = base + "_" + (suffix++);
+      }
+      await run(
+        "INSERT INTO users (id, first_name, surname, email, username, password_hash, google_id, email_verified, account_status) VALUES ($1,$2,$3,$4,$5,$6,$7,1,'active')",
+        [userId, firstName, surname, email, username, cryptoLocal.randomBytes(32).toString("hex"), googleId]
+      );
+      await run("INSERT INTO user_settings (user_id) VALUES ($1) ON CONFLICT DO NOTHING", [userId]);
+    }
+
+    const accessToken = jwt.sign(
+      { sub: userId, type: "access" },
+      envLocal.jwt.secret,
+      { expiresIn: envLocal.jwt.expiresIn }
+    );
+
+    res.json({
+      success: true,
+      isNewUser: isNew,
+      user: { id: userId, email: email, first_name: firstName },
+      accessToken: accessToken
+    });
+  } catch (err) {
+    console.error("[GOOGLE-LOGIN]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ACCOUNT DELETION ---------- */
+
+app.post("/api/v1/me/delete-confirm", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    let userId = null;
+    try {
+      const payload = jwt.verify(authHeader.slice(7), envLocal.jwt.secret);
+      userId = payload.sub;
+    } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const u = await query("SELECT email, first_name FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    const user = u.rows[0];
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = cryptoA.createHash("sha256").update(code).digest("hex");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    await run(
+      "INSERT INTO verification_codes (id, user_id, channel, destination, code_hash, purpose, expires_at) VALUES ($1,$2,'email',$3,$4,'account_delete',$5)",
+      [uuidv4(), userId, user.email, codeHash, expiresAt]
+    );
+
+    const html = buildVerificationEmail(code, user.first_name);
+    const result = await sendBrevoEmail(user.email, "Confirm your Connecto account deletion", html);
+    if (!result.sent) return res.status(502).json({ success: false, error: "EMAIL_SEND_FAILED", details: result });
+
+    res.json({ success: true, message: "Confirmation code sent to " + user.email });
+  } catch (err) {
+    console.error("[DELETE-CONFIRM]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/me", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    let userId = null;
+    try {
+      const payload = jwt.verify(authHeader.slice(7), envLocal.jwt.secret);
+      userId = payload.sub;
+    } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const code = String(req.body.code || "");
+    if (!code) return res.status(400).json({ success: false, error: "CODE_REQUIRED" });
+
+    const codeHash = cryptoA.createHash("sha256").update(code).digest("hex");
+    const r = await query(
+      "SELECT * FROM verification_codes WHERE user_id=$1 AND code_hash=$2 AND purpose='account_delete' AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP ORDER BY created_at DESC LIMIT 1",
+      [userId, codeHash]
+    );
+    if (!r.rows.length) return res.status(400).json({ success: false, error: "INVALID_OR_EXPIRED_CODE" });
+
+    await run("UPDATE verification_codes SET used_at=CURRENT_TIMESTAMP WHERE id=$1", [r.rows[0].id]);
+    await run("UPDATE users SET deleted_at=CURRENT_TIMESTAMP, account_status='deleted' WHERE id=$1", [userId]);
+    await run("UPDATE refresh_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=$1", [userId]);
+    await run("UPDATE sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=$1", [userId]);
+
+    res.json({ success: true, message: "Account deleted." });
+  } catch (err) {
+    console.error("[DELETE-ME]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ============================================================
+   BACKGROUND JOB — retry pending verification emails every 60s
+   ==========================================================*/
+
+let __patchAInterval = null;
+
+function startPatchARetryJob() {
+  if (__patchAInterval) return;
+  __patchAInterval = setInterval(async () => {
+    try {
+      const { query, run } = require("./src/db");
+      const { v4: uuidv4 } = require("uuid");
+
+      const pending = await query(
+        "SELECT id, email, first_name FROM users WHERE email_verified=0 AND account_status='active' AND verification_pending=1 LIMIT 20"
+      );
+      if (!pending.rows.length) return;
+
+      for (const u of pending.rows) {
+        const recent = await query(
+          "SELECT COUNT(*) AS c FROM verification_codes WHERE user_id=$1 AND purpose='email_verify' AND created_at > datetime('now','-1 hour')",
+          [u.id]
+        );
+        if (Number(recent.rows[0].c || 0) >= 2) continue;
+
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const codeHash = cryptoA.createHash("sha256").update(code).digest("hex");
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+        await run(
+          "INSERT INTO verification_codes (id, user_id, channel, destination, code_hash, purpose, expires_at) VALUES ($1,$2,'email',$3,$4,'email_verify',$5)",
+          [uuidv4(), u.id, u.email, codeHash, expiresAt]
+        );
+
+        const html = buildVerificationEmail(code, u.first_name);
+        const result = await sendBrevoEmail(u.email, "Your Connecto verification code", html);
+
+        if (result.sent) {
+          await run("UPDATE users SET verification_pending=0, verify_grace_started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [u.id]);
+          console.log("[PATCH-A RETRY] Sent verification to", u.email);
+        }
+      }
+    } catch (e) {
+      console.error("[PATCH-A RETRY JOB]", e.message);
+    }
+  }, 60000);
+}
+
+if (typeof app !== "undefined") {
+  startPatchARetryJob();
+}

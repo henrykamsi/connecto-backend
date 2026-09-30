@@ -1,0 +1,56 @@
+
+function sha256Hex(s) {
+  return cryptoA.createHash("sha256").update(String(s)).digest("hex");
+}
+
+async function getProviderCredential(category, provider) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT * FROM provider_credentials WHERE category=$1 AND provider=$2 AND is_active=1 ORDER BY is_primary DESC, priority ASC LIMIT 1",
+      [category, provider]
+    );
+    if (!r.rows.length) return null;
+    const row = r.rows[0];
+    const KEY = process.env.CONTROL_ENCRYPTION_KEY;
+    if (!KEY) return null;
+    const raw = Buffer.from(row.credentials_enc, "base64");
+    const iv = raw.subarray(0, 12);
+    const tag = raw.subarray(12, 28);
+    const data = raw.subarray(28);
+    const decipher = cryptoA.createDecipheriv("aes-256-gcm", Buffer.from(KEY, "hex"), iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+    return JSON.parse(decrypted.toString("utf8"));
+  } catch (e) {
+    console.error("[getProviderCredential]", e.message);
+    return null;
+  }
+}
+
+async function sendBrevoEmail(to, subject, htmlContent) {
+  const cred = await getProviderCredential("email", "brevo");
+  if (!cred) return { sent: false, reason: "NO_BREVO_CREDENTIAL" };
+  const apiKey = cred.apiKey || cred.api_key;
+  if (!apiKey) return { sent: false, reason: "NO_API_KEY" };
+  const senderEmail = cred.senderEmail || "henryglobaltechs@gmail.com";
+  const senderName = cred.senderName || "Henry Global Tech";
+  try {
+    const resp = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: { "api-key": apiKey, "Content-Type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        sender: { email: senderEmail, name: senderName },
+        to: [{ email: to }],
+        subject: subject,
+        htmlContent: htmlContent
+      })
+    });
+    const body = await resp.text();
+    if (!resp.ok) return { sent: false, reason: "BREVO_FAILED", status: resp.status, details: body };
+    return { sent: true, details: body };
+  } catch (e) {
+    return { sent: false, reason: "NETWORK_ERROR", details: e.message };
+  }
+}
+
