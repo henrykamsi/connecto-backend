@@ -38,7 +38,8 @@ app.get("/", (req, res) => {
   });
 });
 
-/* GLOBAL WEBHOOK LOGGER */
+
+/* GLOBAL WEBHOOK LOGGER v2 */
 const WEBHOOK_EVENT_MAP = {
   "POST /api/v1/auth/register": "user.registered",
   "POST /api/v1/auth/login": "user.logged_in",
@@ -76,31 +77,44 @@ function matchWebhookEvent(method, path) {
   return null;
 }
 
-app.use(function(req, res, next) {
-  res.on("finish", function() {
+app.use(function webhookLogger(req, res, next) {
+  if (req.path.indexOf("/control-api") === 0) return next();
+  if (req.path.indexOf("/ws") === 0) return next();
+
+  const eventName = matchWebhookEvent(req.method, req.path);
+  if (!eventName) return next();
+
+  const originalJson = res.json.bind(res);
+  const originalSend = res.send.bind(res);
+
+  let logged = false;
+
+  async function logEvent(statusCode) {
+    if (logged) return;
+    logged = true;
+    if (statusCode >= 400) return;
+
     try {
-      if (req.path.indexOf("/control-api") === 0) return;
-      if (req.path.indexOf("/ws") === 0) return;
-      const eventName = matchWebhookEvent(req.method, req.path);
-      if (!eventName) return;
-      if (res.statusCode >= 400) return;
       const db = require("./src/db");
       const uuid = require("uuid");
+
       const actorId = req.user && req.user.id ? req.user.id : null;
       const targetId =
         (req.params && req.params.postId) ||
         (req.params && req.params.userId) ||
         (req.params && req.params.id) ||
         null;
+
       const payload = {
         method: req.method,
         path: req.path,
         actorId: actorId,
         targetId: targetId,
-        status: res.statusCode,
+        status: statusCode,
         at: new Date().toISOString()
       };
-      db.run(
+
+      await db.run(
         "INSERT INTO webhook_events (id, direction, source, event_type, url, status, attempts, request_body, status_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         [
           uuid.v4(),
@@ -111,14 +125,34 @@ app.use(function(req, res, next) {
           "logged",
           0,
           JSON.stringify(payload),
-          res.statusCode
+          statusCode
         ]
-      ).catch(function(){});
-    } catch (err) {}
-  });
+      );
+
+      console.log("[WEBHOOK LOGGED]", eventName);
+    } catch (err) {
+      console.error("[WEBHOOK LOG FAILED]", err.message);
+    }
+  }
+
+  res.json = function(body) {
+    const status = res.statusCode;
+    logEvent(status).finally(function() {
+      originalJson(body);
+    });
+    return res;
+  };
+
+  res.send = function(body) {
+    const status = res.statusCode;
+    logEvent(status).finally(function() {
+      originalSend(body);
+    });
+    return res;
+  };
+
   next();
 });
-
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
