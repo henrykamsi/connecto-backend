@@ -1953,4 +1953,5 @@ router.get("/control-api/users/search", controlAuth, async (req, res) => {
   }
 });
 
+console.log("[CONTROL-SERVER] loaded " + (router.stack.filter(l=>l.route).length) + " routes");
 module.exports = router;
