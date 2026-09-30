@@ -1590,4 +1590,54 @@ router.post("/change-email", controlAuth, async (req, res) => {
  * EXPORT
  * ==========================================================================*/
 
+router.post("/credentials/:id/test-push", controlAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const deviceToken = body.deviceToken;
+    const title = body.title;
+    const messageBody = body.body;
+    if (!deviceToken) {
+      return res.status(400).json({ success: false, error: "deviceToken required" });
+    }
+    const existing = await get(
+      "SELECT * FROM provider_credentials WHERE id=$1",
+      [req.params.id]
+    );
+    if (!existing) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    let credentials;
+    try { credentials = decryptJson(existing.credentials_enc); }
+    catch (e) { return res.status(500).json({ success: false, error: "DECRYPT_FAILED" }); }
+    const admin = require("firebase-admin");
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: credentials.projectId,
+          clientEmail: credentials.clientEmail,
+          privateKey: String(credentials.privateKey).replace(/\\n/g, "\n")
+        })
+      });
+    }
+    const messageId = await admin.messaging().send({
+      token: deviceToken,
+      notification: {
+        title: title || "Connecto test",
+        body: messageBody || "Test push from control panel."
+      },
+      data: { type: "TEST_PUSH" },
+      android: { priority: "high" }
+    });
+    await providerEvent({
+      credentialId: existing.id,
+      category: "push",
+      provider: "fcm",
+      eventType: "FCM_TEST_PUSH",
+      status: "ok",
+      message: "Test push sent",
+      metadata: { messageId: messageId }
+    });
+    res.json({ success: true, message: "Test push sent", messageId: messageId });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 module.exports = router;

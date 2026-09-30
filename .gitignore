@@ -11,3 +11,8 @@ node_modules/
 # Local environment backups
 .env.backup
 .env.backup.*
+
+*.bak
+*.bak-*
+*.new.js
+server.js.new
