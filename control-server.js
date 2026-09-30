@@ -1706,7 +1706,7 @@ router.post("/credentials/:id/test-email", controlAuth, async (req, res) => {
 
 /* ---------- ORGANIZATIONS (CONTROL API) ---------- */
 
-router.get("/control-api/organizations", controlAuth, async (req, res) => {
+router.get("/organizations", controlAuth, async (req, res) => {
   try {
     const { query } = require("./src/db");
     const r = await query("SELECT * FROM organizations ORDER BY created_at DESC LIMIT 200");
@@ -1716,7 +1716,7 @@ router.get("/control-api/organizations", controlAuth, async (req, res) => {
   }
 });
 
-router.post("/control-api/organizations", controlAuth, async (req, res) => {
+router.post("/organizations", controlAuth, async (req, res) => {
   try {
     const { query, run } = require("./src/db");
     const { v4: uuidv4 } = require("uuid");
@@ -1754,7 +1754,7 @@ router.post("/control-api/organizations", controlAuth, async (req, res) => {
   }
 });
 
-router.patch("/control-api/organizations/:id", controlAuth, async (req, res) => {
+router.patch("/organizations/:id", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     const allowed = ["name", "label", "description", "category", "logo_url", "cover_url", "base_follower_count", "daily_post_limit", "weekly_post_limit", "monthly_post_limit", "blue_check", "is_active"];
@@ -1774,7 +1774,7 @@ router.patch("/control-api/organizations/:id", controlAuth, async (req, res) => 
   }
 });
 
-router.delete("/control-api/organizations/:id", controlAuth, async (req, res) => {
+router.delete("/organizations/:id", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     await run("UPDATE organizations SET is_active=0, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
@@ -1785,7 +1785,7 @@ router.delete("/control-api/organizations/:id", controlAuth, async (req, res) =>
   }
 });
 
-router.get("/control-api/organizations/:id/members", controlAuth, async (req, res) => {
+router.get("/organizations/:id/members", controlAuth, async (req, res) => {
   try {
     const { query } = require("./src/db");
     const r = await query(
@@ -1798,7 +1798,7 @@ router.get("/control-api/organizations/:id/members", controlAuth, async (req, re
   }
 });
 
-router.post("/control-api/organizations/:id/invite", controlAuth, async (req, res) => {
+router.post("/organizations/:id/invite", controlAuth, async (req, res) => {
   try {
     const { query, run } = require("./src/db");
     const { v4: uuidv4 } = require("uuid");
@@ -1844,7 +1844,7 @@ router.post("/control-api/organizations/:id/invite", controlAuth, async (req, re
   }
 });
 
-router.delete("/control-api/organizations/:id/members/:userId", controlAuth, async (req, res) => {
+router.delete("/organizations/:id/members/:userId", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     await run("DELETE FROM organization_members WHERE organization_id=$1 AND user_id=$2", [req.params.id, req.params.userId]);
@@ -1855,7 +1855,7 @@ router.delete("/control-api/organizations/:id/members/:userId", controlAuth, asy
   }
 });
 
-router.post("/control-api/organizations/seed", controlAuth, async (req, res) => {
+router.post("/organizations/seed", controlAuth, async (req, res) => {
   try {
     const { query, run } = require("./src/db");
     const { v4: uuidv4 } = require("uuid");
@@ -1890,7 +1890,7 @@ router.post("/control-api/organizations/seed", controlAuth, async (req, res) => 
 
 /* ---------- VERIFY / UNVERIFY USER ---------- */
 
-router.post("/control-api/users/:id/verify", controlAuth, async (req, res) => {
+router.post("/users/:id/verify", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     const label = String(req.body.label || "Verified Account");
@@ -1902,7 +1902,7 @@ router.post("/control-api/users/:id/verify", controlAuth, async (req, res) => {
   }
 });
 
-router.delete("/control-api/users/:id/verify", controlAuth, async (req, res) => {
+router.delete("/users/:id/verify", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     await run("UPDATE users SET is_verified=0, verified_label=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
@@ -1915,7 +1915,7 @@ router.delete("/control-api/users/:id/verify", controlAuth, async (req, res) => 
 
 /* ---------- DISPLAY NUMBERS (fake followers / likes) ---------- */
 
-router.post("/control-api/users/:id/display-numbers", controlAuth, async (req, res) => {
+router.post("/users/:id/display-numbers", controlAuth, async (req, res) => {
   try {
     const { run } = require("./src/db");
     const f = req.body.followers;
@@ -1934,7 +1934,7 @@ router.post("/control-api/users/:id/display-numbers", controlAuth, async (req, r
 
 /* ---------- SEARCH USERS (for panel) ---------- */
 
-router.get("/control-api/users/search", controlAuth, async (req, res) => {
+router.get("/users/search", controlAuth, async (req, res) => {
   try {
     const { query } = require("./src/db");
     const q = String(req.query.q || "").trim();
