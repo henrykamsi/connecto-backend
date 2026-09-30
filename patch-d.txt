@@ -1,0 +1,463 @@
+/* ============================================================
+   PATCH D — MENTIONS, FYP, DISCOVERY, BADGES
+   ==========================================================*/
+
+/* ---------- MENTIONS SCHEMA SAFETY ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    await run("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, post_id TEXT, comment_id TEXT, mentioned_user_id TEXT NOT NULL, mentioning_user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    await run("CREATE INDEX IF NOT EXISTS idx_mentions_user ON mentions(mentioned_user_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_mentions_post ON mentions(post_id)");
+    await run("CREATE TABLE IF NOT EXISTS fyp_tags (id TEXT PRIMARY KEY, post_id TEXT NOT NULL UNIQUE, author_id TEXT NOT NULL, tagged_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at TEXT)");
+    await run("CREATE INDEX IF NOT EXISTS idx_fyp_author ON fyp_tags(author_id)");
+    await run("CREATE TABLE IF NOT EXISTS fyp_impressions (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, viewer_id TEXT NOT NULL, impression_count INTEGER NOT NULL DEFAULT 0, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(post_id, viewer_id))");
+    await run("CREATE INDEX IF NOT EXISTS idx_fyp_imp_viewer ON fyp_impressions(viewer_id)");
+    await run("CREATE TABLE IF NOT EXISTS post_badges (id TEXT PRIMARY KEY, post_id TEXT NOT NULL UNIQUE, badge TEXT NOT NULL, awarded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    await run("CREATE INDEX IF NOT EXISTS idx_badges_badge ON post_badges(badge)");
+    console.log("[PATCH-D] schema ready");
+  } catch (e) {
+    console.error("[PATCH-D] schema:", e.message);
+  }
+})();
+
+/* ---------- HELPERS ---------- */
+
+function extractMentions(text) {
+  if (!text) return [];
+  const matches = String(text).match(/@([a-zA-Z0-9_]{3,32})/g);
+  if (!matches) return [];
+  const seen = {};
+  const out = [];
+  for (const m of matches) {
+    const u = m.slice(1).toLowerCase();
+    if (u === "fyp") continue;
+    if (seen[u]) continue;
+    seen[u] = true;
+    out.push(u);
+  }
+  return out;
+}
+
+function extractHashTags(text) {
+  if (!text) return [];
+  const matches = String(text).match(/#([a-zA-Z0-9_]{2,40})/g);
+  if (!matches) return [];
+  const seen = {};
+  const out = [];
+  for (const m of matches) {
+    const t = m.slice(1).toLowerCase();
+    if (seen[t]) continue;
+    seen[t] = true;
+    out.push(t);
+  }
+  return out;
+}
+
+async function recordMentions(text, postId, commentId, mentioningUserId) {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const usernames = extractMentions(text);
+    if (!usernames.length) return [];
+
+    const notified = [];
+    for (const uname of usernames) {
+      const u = await query("SELECT id, first_name FROM users WHERE lower(username)=lower($1) AND account_status='active' LIMIT 1", [uname]);
+      if (!u.rows.length) continue;
+      const target = u.rows[0];
+      if (target.id === mentioningUserId) continue;
+
+      await run(
+        "INSERT INTO mentions (id, post_id, comment_id, mentioned_user_id, mentioning_user_id) VALUES ($1,$2,$3,$4,$5)",
+        [uuidv4(), postId || null, commentId || null, target.id, mentioningUserId]
+      );
+
+      try {
+        const { notify } = require("./src/services/notifications");
+        if (notify) {
+          await notify({
+            userId: target.id,
+            actorId: mentioningUserId,
+            type: "USER_MENTIONED",
+            title: "You were mentioned",
+            body: "Someone mentioned you in a post",
+            targetType: postId ? "post" : "comment",
+            targetId: postId || commentId
+          });
+        }
+      } catch (e) { /* notifications optional */ }
+
+      notified.push(target.id);
+    }
+    return notified;
+  } catch (e) {
+    console.error("[recordMentions]", e.message);
+    return [];
+  }
+}
+
+/* ---------- MENTION SUGGEST AUTOCOMPLETE ---------- */
+
+app.get("/api/v1/mentions/suggest", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const limit = Math.min(Number(req.query.limit || 10), 25);
+
+    if (!q) {
+      const r = await query(
+        "SELECT DISTINCT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.following_id WHERE f.follower_id=$1 AND u.account_status='active' LIMIT $2",
+        [userId, limit]
+      );
+      return res.json({ success: true, suggestions: r.rows });
+    }
+
+    const r = await query(
+      "SELECT id, first_name, surname, username, profile_photo_media_id FROM users WHERE account_status='active' AND deleted_at IS NULL AND lower(username) LIKE lower($1) AND id<>$2 ORDER BY created_at DESC LIMIT $3",
+      [q + "%", userId, limit]
+    );
+    res.json({ success: true, suggestions: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- USERS BY USERNAME (for mention resolution) ---------- */
+
+app.get("/api/v1/users/by-username/:username", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const u = await query(
+      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id FROM users WHERE lower(username)=lower($1) AND deleted_at IS NULL LIMIT 1",
+      [req.params.username]
+    );
+    if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    res.json({ success: true, user: u.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ---------- FYP TAG ---------- */
+
+async function getFypDailyLimit(userId) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [userId]);
+    const followers = Number(r.rows[0].c || 0);
+    if (followers < 100) return 1;
+    if (followers < 500) return 1;
+    if (followers < 1000) return 3;
+    if (followers < 5000) return 5;
+    return 10;
+  } catch (e) {
+    return 1;
+  }
+}
+
+async function getFypUsedToday(userId) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT COUNT(*) AS c FROM fyp_tags WHERE author_id=$1 AND tagged_at > datetime('now','start of day')",
+      [userId]
+    );
+    return Number(r.rows[0].c || 0);
+  } catch (e) {
+    return 0;
+  }
+}
+
+app.get("/api/v1/fyp/quota", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = await getFypDailyLimit(userId);
+    const used = await getFypUsedToday(userId);
+
+    res.json({ success: true, dailyLimit: limit, usedToday: used, remaining: Math.max(0, limit - used), resetsAt: "midnight UTC" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/posts/:id/fyp", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const post = await query("SELECT * FROM posts WHERE id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [req.params.id, userId]);
+    if (!post.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND_OR_NOT_OWNER" });
+
+    const limit = await getFypDailyLimit(userId);
+    const used = await getFypUsedToday(userId);
+    if (used >= limit) {
+      return res.status(429).json({ success: false, error: "FYP_LIMIT_REACHED", dailyLimit: limit, usedToday: used });
+    }
+
+    const existing = await query("SELECT id FROM fyp_tags WHERE post_id=$1", [req.params.id]);
+    if (existing.rows.length) return res.json({ success: true, alreadyTagged: true });
+
+    await run(
+      "INSERT INTO fyp_tags (id, post_id, author_id) VALUES ($1,$2,$3)",
+      [uuidv4(), req.params.id, userId]
+    );
+
+    res.json({ success: true, tagged: true, usedToday: used + 1, dailyLimit: limit });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/posts/:id/fyp", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run("DELETE FROM fyp_tags WHERE post_id=$1 AND author_id=$2", [req.params.id, userId]);
+    res.json({ success: true, untagged: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DISCOVERY FEED ---------- */
+
+app.get("/api/v1/discovery", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+
+    const r = await query(
+      "SELECT p.id, p.text, p.author_id, p.created_at, u.username, u.first_name, u.surname, u.profile_photo_media_id, COALESCE(fi.impression_count, 0) AS viewer_impressions FROM fyp_tags ft JOIN posts p ON p.id = ft.post_id JOIN users u ON u.id = p.author_id LEFT JOIN fyp_impressions fi ON fi.post_id = p.id AND fi.viewer_id = $1 WHERE p.deleted_at IS NULL AND u.account_status='active' AND COALESCE(fi.impression_count, 0) < 2 ORDER BY ft.tagged_at DESC LIMIT $2",
+      [userId, limit]
+    );
+
+    res.json({ success: true, posts: r.rows, logic: "max 2 impressions per viewer per post" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/discovery/:postId/impression", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const existing = await query("SELECT * FROM fyp_impressions WHERE post_id=$1 AND viewer_id=$2 LIMIT 1", [req.params.postId, userId]);
+
+    if (!existing.rows.length) {
+      await run("INSERT INTO fyp_impressions (id, post_id, viewer_id, impression_count) VALUES ($1,$2,$3,1)", [uuidv4(), req.params.postId, userId]);
+      return res.json({ success: true, impressionCount: 1, exhausted: false });
+    }
+
+    const current = Number(existing.rows[0].impression_count || 0);
+    if (current >= 2) return res.json({ success: true, impressionCount: current, exhausted: true });
+
+    await run(
+      "UPDATE fyp_impressions SET impression_count=impression_count+1, last_seen_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [existing.rows[0].id]
+    );
+
+    res.json({ success: true, impressionCount: current + 1, exhausted: current + 1 >= 2 });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ============================================================
+   PATCH D — PART 3
+   Badges background job + integration helpers
+   ==========================================================*/
+
+/* ---------- BADGE EVALUATION ---------- */
+
+async function evaluateBadge(postId) {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+
+    const p = await query(
+      "SELECT p.id, p.author_id, p.created_at, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS likes, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comments FROM posts p WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      [postId]
+    );
+    if (!p.rows.length) return null;
+    const post = p.rows[0];
+
+    const f = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [post.author_id]);
+    const followers = Number(f.rows[0].c || 0);
+    const likes = Number(post.likes || 0);
+    const comments = Number(post.comments || 0);
+
+    const created = new Date(post.created_at).getTime();
+    const ageHours = (Date.now() - created) / (1000 * 60 * 60);
+
+    let badge = null;
+
+    if (likes >= 500 && comments >= 50 && followers >= 100) {
+      badge = "legend";
+    } else if (likes >= 500 && ageHours <= 1) {
+      badge = "blue_proof";
+    } else if (likes >= 200) {
+      badge = "on_fire";
+    } else if (followers >= 100 && likes > followers) {
+      badge = "rising";
+    }
+
+    const existing = await query("SELECT * FROM post_badges WHERE post_id=$1 LIMIT 1", [postId]);
+
+    if (!badge) {
+      if (existing.rows.length) await run("DELETE FROM post_badges WHERE post_id=$1", [postId]);
+      return null;
+    }
+
+    if (existing.rows.length) {
+      if (existing.rows[0].badge !== badge) {
+        await run("UPDATE post_badges SET badge=$1, awarded_at=CURRENT_TIMESTAMP WHERE post_id=$2", [badge, postId]);
+      }
+      return badge;
+    }
+
+    await run("INSERT INTO post_badges (id, post_id, badge) VALUES ($1,$2,$3)", [uuidv4(), postId, badge]);
+    return badge;
+  } catch (e) {
+    console.error("[evaluateBadge]", e.message);
+    return null;
+  }
+}
+
+/* ---------- BADGES BACKGROUND JOB ---------- */
+
+let __patchDBadgesInterval = null;
+
+function startPatchDBadgesJob() {
+  if (__patchDBadgesInterval) return;
+
+  __patchDBadgesInterval = setInterval(async () => {
+    try {
+      const { query } = require("./src/db");
+
+      const recent = await query(
+        "SELECT id FROM posts WHERE deleted_at IS NULL AND created_at > datetime('now','-2 days') ORDER BY created_at DESC LIMIT 100"
+      );
+
+      let evaluated = 0;
+      for (const row of recent.rows) {
+        const result = await evaluateBadge(row.id);
+        if (result) evaluated++;
+      }
+
+      if (evaluated > 0) console.log("[PATCH-D BADGES] Evaluated", evaluated, "posts");
+    } catch (e) {
+      console.error("[PATCH-D BADGES JOB]", e.message);
+    }
+  }, 300000);
+
+  setTimeout(() => {
+    try { require("./src/db").run("SELECT 1").catch(() => {}); } catch (e) {}
+  }, 5000);
+}
+
+if (typeof app !== "undefined") {
+  startPatchDBadgesJob();
+}
+
+/* ---------- BADGES LOOKUP ---------- */
+
+app.get("/api/v1/posts/:id/badge", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query("SELECT badge, awarded_at FROM post_badges WHERE post_id=$1 LIMIT 1", [req.params.id]);
+    res.json({ success: true, badge: r.rows.length ? r.rows[0] : null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/badges/trending", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT b.badge, b.awarded_at, p.id AS post_id, p.text, p.author_id, u.username, u.first_name, u.surname FROM post_badges b JOIN posts p ON p.id = b.post_id JOIN users u ON u.id = p.author_id WHERE p.deleted_at IS NULL AND b.badge IN ('blue_proof','legend') ORDER BY b.awarded_at DESC LIMIT 30"
+    );
+    res.json({ success: true, trending: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MENTIONS LIST FOR A USER ---------- */
+
+app.get("/api/v1/me/mentions", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 30), 100);
+
+    const r = await query(
+      "SELECT m.id, m.post_id, m.comment_id, m.created_at, u.username, u.first_name, u.surname, u.profile_photo_media_id, p.text AS post_text FROM mentions m JOIN users u ON u.id = m.mentioning_user_id LEFT JOIN posts p ON p.id = m.post_id WHERE m.mentioned_user_id=$1 ORDER BY m.created_at DESC LIMIT $2",
+      [userId, limit]
+    );
+
+    res.json({ success: true, mentions: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- EXPOSE HELPERS FOR OTHER ROUTES ---------- */
+/* These are exposed so existing post/comment routes can call them by name */
+
+global.connectoHelpers = global.connectoHelpers || {};
+global.connectoHelpers.recordMentions = recordMentions;
+global.connectoHelpers.extractHashTags = extractHashTags;
+global.connectoHelpers.evaluateBadge = evaluateBadge;

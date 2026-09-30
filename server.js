@@ -1762,6 +1762,1140 @@ app.post("/api/v1/media/test-b2", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+/* ============================================================
+   PATCH D — MENTIONS, FYP, DISCOVERY, BADGES
+   ==========================================================*/
+
+/* ---------- MENTIONS SCHEMA SAFETY ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    await run("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, post_id TEXT, comment_id TEXT, mentioned_user_id TEXT NOT NULL, mentioning_user_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    await run("CREATE INDEX IF NOT EXISTS idx_mentions_user ON mentions(mentioned_user_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_mentions_post ON mentions(post_id)");
+    await run("CREATE TABLE IF NOT EXISTS fyp_tags (id TEXT PRIMARY KEY, post_id TEXT NOT NULL UNIQUE, author_id TEXT NOT NULL, tagged_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, expires_at TEXT)");
+    await run("CREATE INDEX IF NOT EXISTS idx_fyp_author ON fyp_tags(author_id)");
+    await run("CREATE TABLE IF NOT EXISTS fyp_impressions (id TEXT PRIMARY KEY, post_id TEXT NOT NULL, viewer_id TEXT NOT NULL, impression_count INTEGER NOT NULL DEFAULT 0, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(post_id, viewer_id))");
+    await run("CREATE INDEX IF NOT EXISTS idx_fyp_imp_viewer ON fyp_impressions(viewer_id)");
+    await run("CREATE TABLE IF NOT EXISTS post_badges (id TEXT PRIMARY KEY, post_id TEXT NOT NULL UNIQUE, badge TEXT NOT NULL, awarded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    await run("CREATE INDEX IF NOT EXISTS idx_badges_badge ON post_badges(badge)");
+    console.log("[PATCH-D] schema ready");
+  } catch (e) {
+    console.error("[PATCH-D] schema:", e.message);
+  }
+})();
+
+/* ---------- HELPERS ---------- */
+
+function extractMentions(text) {
+  if (!text) return [];
+  const matches = String(text).match(/@([a-zA-Z0-9_]{3,32})/g);
+  if (!matches) return [];
+  const seen = {};
+  const out = [];
+  for (const m of matches) {
+    const u = m.slice(1).toLowerCase();
+    if (u === "fyp") continue;
+    if (seen[u]) continue;
+    seen[u] = true;
+    out.push(u);
+  }
+  return out;
+}
+
+function extractHashTags(text) {
+  if (!text) return [];
+  const matches = String(text).match(/#([a-zA-Z0-9_]{2,40})/g);
+  if (!matches) return [];
+  const seen = {};
+  const out = [];
+  for (const m of matches) {
+    const t = m.slice(1).toLowerCase();
+    if (seen[t]) continue;
+    seen[t] = true;
+    out.push(t);
+  }
+  return out;
+}
+
+async function recordMentions(text, postId, commentId, mentioningUserId) {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const usernames = extractMentions(text);
+    if (!usernames.length) return [];
+
+    const notified = [];
+    for (const uname of usernames) {
+      const u = await query("SELECT id, first_name FROM users WHERE lower(username)=lower($1) AND account_status='active' LIMIT 1", [uname]);
+      if (!u.rows.length) continue;
+      const target = u.rows[0];
+      if (target.id === mentioningUserId) continue;
+
+      await run(
+        "INSERT INTO mentions (id, post_id, comment_id, mentioned_user_id, mentioning_user_id) VALUES ($1,$2,$3,$4,$5)",
+        [uuidv4(), postId || null, commentId || null, target.id, mentioningUserId]
+      );
+
+      try {
+        const { notify } = require("./src/services/notifications");
+        if (notify) {
+          await notify({
+            userId: target.id,
+            actorId: mentioningUserId,
+            type: "USER_MENTIONED",
+            title: "You were mentioned",
+            body: "Someone mentioned you in a post",
+            targetType: postId ? "post" : "comment",
+            targetId: postId || commentId
+          });
+        }
+      } catch (e) { /* notifications optional */ }
+
+      notified.push(target.id);
+    }
+    return notified;
+  } catch (e) {
+    console.error("[recordMentions]", e.message);
+    return [];
+  }
+}
+
+/* ---------- MENTION SUGGEST AUTOCOMPLETE ---------- */
+
+app.get("/api/v1/mentions/suggest", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const q = String(req.query.q || "").trim().toLowerCase();
+    const limit = Math.min(Number(req.query.limit || 10), 25);
+
+    if (!q) {
+      const r = await query(
+        "SELECT DISTINCT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.following_id WHERE f.follower_id=$1 AND u.account_status='active' LIMIT $2",
+        [userId, limit]
+      );
+      return res.json({ success: true, suggestions: r.rows });
+    }
+
+    const r = await query(
+      "SELECT id, first_name, surname, username, profile_photo_media_id FROM users WHERE account_status='active' AND deleted_at IS NULL AND lower(username) LIKE lower($1) AND id<>$2 ORDER BY created_at DESC LIMIT $3",
+      [q + "%", userId, limit]
+    );
+    res.json({ success: true, suggestions: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- USERS BY USERNAME (for mention resolution) ---------- */
+
+app.get("/api/v1/users/by-username/:username", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const u = await query(
+      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id FROM users WHERE lower(username)=lower($1) AND deleted_at IS NULL LIMIT 1",
+      [req.params.username]
+    );
+    if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    res.json({ success: true, user: u.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ---------- FYP TAG ---------- */
+
+async function getFypDailyLimit(userId) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [userId]);
+    const followers = Number(r.rows[0].c || 0);
+    if (followers < 100) return 1;
+    if (followers < 500) return 1;
+    if (followers < 1000) return 3;
+    if (followers < 5000) return 5;
+    return 10;
+  } catch (e) {
+    return 1;
+  }
+}
+
+async function getFypUsedToday(userId) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT COUNT(*) AS c FROM fyp_tags WHERE author_id=$1 AND tagged_at > datetime('now','start of day')",
+      [userId]
+    );
+    return Number(r.rows[0].c || 0);
+  } catch (e) {
+    return 0;
+  }
+}
+
+app.get("/api/v1/fyp/quota", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = await getFypDailyLimit(userId);
+    const used = await getFypUsedToday(userId);
+
+    res.json({ success: true, dailyLimit: limit, usedToday: used, remaining: Math.max(0, limit - used), resetsAt: "midnight UTC" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/posts/:id/fyp", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const post = await query("SELECT * FROM posts WHERE id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [req.params.id, userId]);
+    if (!post.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND_OR_NOT_OWNER" });
+
+    const limit = await getFypDailyLimit(userId);
+    const used = await getFypUsedToday(userId);
+    if (used >= limit) {
+      return res.status(429).json({ success: false, error: "FYP_LIMIT_REACHED", dailyLimit: limit, usedToday: used });
+    }
+
+    const existing = await query("SELECT id FROM fyp_tags WHERE post_id=$1", [req.params.id]);
+    if (existing.rows.length) return res.json({ success: true, alreadyTagged: true });
+
+    await run(
+      "INSERT INTO fyp_tags (id, post_id, author_id) VALUES ($1,$2,$3)",
+      [uuidv4(), req.params.id, userId]
+    );
+
+    res.json({ success: true, tagged: true, usedToday: used + 1, dailyLimit: limit });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/posts/:id/fyp", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run("DELETE FROM fyp_tags WHERE post_id=$1 AND author_id=$2", [req.params.id, userId]);
+    res.json({ success: true, untagged: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DISCOVERY FEED ---------- */
+
+app.get("/api/v1/discovery", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+
+    const r = await query(
+      "SELECT p.id, p.text, p.author_id, p.created_at, u.username, u.first_name, u.surname, u.profile_photo_media_id, COALESCE(fi.impression_count, 0) AS viewer_impressions FROM fyp_tags ft JOIN posts p ON p.id = ft.post_id JOIN users u ON u.id = p.author_id LEFT JOIN fyp_impressions fi ON fi.post_id = p.id AND fi.viewer_id = $1 WHERE p.deleted_at IS NULL AND u.account_status='active' AND COALESCE(fi.impression_count, 0) < 2 ORDER BY ft.tagged_at DESC LIMIT $2",
+      [userId, limit]
+    );
+
+    res.json({ success: true, posts: r.rows, logic: "max 2 impressions per viewer per post" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/discovery/:postId/impression", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const existing = await query("SELECT * FROM fyp_impressions WHERE post_id=$1 AND viewer_id=$2 LIMIT 1", [req.params.postId, userId]);
+
+    if (!existing.rows.length) {
+      await run("INSERT INTO fyp_impressions (id, post_id, viewer_id, impression_count) VALUES ($1,$2,$3,1)", [uuidv4(), req.params.postId, userId]);
+      return res.json({ success: true, impressionCount: 1, exhausted: false });
+    }
+
+    const current = Number(existing.rows[0].impression_count || 0);
+    if (current >= 2) return res.json({ success: true, impressionCount: current, exhausted: true });
+
+    await run(
+      "UPDATE fyp_impressions SET impression_count=impression_count+1, last_seen_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [existing.rows[0].id]
+    );
+
+    res.json({ success: true, impressionCount: current + 1, exhausted: current + 1 >= 2 });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ============================================================
+   PATCH D — PART 3
+   Badges background job + integration helpers
+   ==========================================================*/
+
+/* ---------- BADGE EVALUATION ---------- */
+
+async function evaluateBadge(postId) {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+
+    const p = await query(
+      "SELECT p.id, p.author_id, p.created_at, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS likes, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comments FROM posts p WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      [postId]
+    );
+    if (!p.rows.length) return null;
+    const post = p.rows[0];
+
+    const f = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [post.author_id]);
+    const followers = Number(f.rows[0].c || 0);
+    const likes = Number(post.likes || 0);
+    const comments = Number(post.comments || 0);
+
+    const created = new Date(post.created_at).getTime();
+    const ageHours = (Date.now() - created) / (1000 * 60 * 60);
+
+    let badge = null;
+
+    if (likes >= 500 && comments >= 50 && followers >= 100) {
+      badge = "legend";
+    } else if (likes >= 500 && ageHours <= 1) {
+      badge = "blue_proof";
+    } else if (likes >= 200) {
+      badge = "on_fire";
+    } else if (followers >= 100 && likes > followers) {
+      badge = "rising";
+    }
+
+    const existing = await query("SELECT * FROM post_badges WHERE post_id=$1 LIMIT 1", [postId]);
+
+    if (!badge) {
+      if (existing.rows.length) await run("DELETE FROM post_badges WHERE post_id=$1", [postId]);
+      return null;
+    }
+
+    if (existing.rows.length) {
+      if (existing.rows[0].badge !== badge) {
+        await run("UPDATE post_badges SET badge=$1, awarded_at=CURRENT_TIMESTAMP WHERE post_id=$2", [badge, postId]);
+      }
+      return badge;
+    }
+
+    await run("INSERT INTO post_badges (id, post_id, badge) VALUES ($1,$2,$3)", [uuidv4(), postId, badge]);
+    return badge;
+  } catch (e) {
+    console.error("[evaluateBadge]", e.message);
+    return null;
+  }
+}
+
+/* ---------- BADGES BACKGROUND JOB ---------- */
+
+let __patchDBadgesInterval = null;
+
+function startPatchDBadgesJob() {
+  if (__patchDBadgesInterval) return;
+
+  __patchDBadgesInterval = setInterval(async () => {
+    try {
+      const { query } = require("./src/db");
+
+      const recent = await query(
+        "SELECT id FROM posts WHERE deleted_at IS NULL AND created_at > datetime('now','-2 days') ORDER BY created_at DESC LIMIT 100"
+      );
+
+      let evaluated = 0;
+      for (const row of recent.rows) {
+        const result = await evaluateBadge(row.id);
+        if (result) evaluated++;
+      }
+
+      if (evaluated > 0) console.log("[PATCH-D BADGES] Evaluated", evaluated, "posts");
+    } catch (e) {
+      console.error("[PATCH-D BADGES JOB]", e.message);
+    }
+  }, 300000);
+
+  setTimeout(() => {
+    try { require("./src/db").run("SELECT 1").catch(() => {}); } catch (e) {}
+  }, 5000);
+}
+
+if (typeof app !== "undefined") {
+  startPatchDBadgesJob();
+}
+
+/* ---------- BADGES LOOKUP ---------- */
+
+app.get("/api/v1/posts/:id/badge", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query("SELECT badge, awarded_at FROM post_badges WHERE post_id=$1 LIMIT 1", [req.params.id]);
+    res.json({ success: true, badge: r.rows.length ? r.rows[0] : null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/badges/trending", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT b.badge, b.awarded_at, p.id AS post_id, p.text, p.author_id, u.username, u.first_name, u.surname FROM post_badges b JOIN posts p ON p.id = b.post_id JOIN users u ON u.id = p.author_id WHERE p.deleted_at IS NULL AND b.badge IN ('blue_proof','legend') ORDER BY b.awarded_at DESC LIMIT 30"
+    );
+    res.json({ success: true, trending: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MENTIONS LIST FOR A USER ---------- */
+
+app.get("/api/v1/me/mentions", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 30), 100);
+
+    const r = await query(
+      "SELECT m.id, m.post_id, m.comment_id, m.created_at, u.username, u.first_name, u.surname, u.profile_photo_media_id, p.text AS post_text FROM mentions m JOIN users u ON u.id = m.mentioning_user_id LEFT JOIN posts p ON p.id = m.post_id WHERE m.mentioned_user_id=$1 ORDER BY m.created_at DESC LIMIT $2",
+      [userId, limit]
+    );
+
+    res.json({ success: true, mentions: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- EXPOSE HELPERS FOR OTHER ROUTES ---------- */
+/* These are exposed so existing post/comment routes can call them by name */
+
+global.connectoHelpers = global.connectoHelpers || {};
+global.connectoHelpers.recordMentions = recordMentions;
+global.connectoHelpers.extractHashTags = extractHashTags;
+global.connectoHelpers.evaluateBadge = evaluateBadge;
+/* ============================================================
+   PATCH E — ORGANIZATIONS
+   ==========================================================*/
+
+/* ---------- ORGANIZATIONS SCHEMA SAFETY ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+
+    await run("CREATE TABLE IF NOT EXISTS organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, slug TEXT NOT NULL UNIQUE, label TEXT, description TEXT, category TEXT, logo_url TEXT, cover_url TEXT, owner_id TEXT NOT NULL, base_follower_count INTEGER NOT NULL DEFAULT 1000, blue_check INTEGER NOT NULL DEFAULT 1, daily_post_limit INTEGER DEFAULT 10, weekly_post_limit INTEGER DEFAULT 50, monthly_post_limit INTEGER DEFAULT 200, is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+
+    await run("CREATE TABLE IF NOT EXISTS organization_members (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'contributor', status TEXT NOT NULL DEFAULT 'invited', invited_by TEXT, invited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, joined_at TEXT, UNIQUE(organization_id, user_id))");
+
+    await run("CREATE TABLE IF NOT EXISTS organization_posts (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, posted_by_user_id TEXT NOT NULL, post_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+
+    await run("CREATE TABLE IF NOT EXISTS organization_follows (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, follower_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(organization_id, follower_id))");
+
+    await run("CREATE INDEX IF NOT EXISTS idx_org_members_user ON organization_members(user_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_org_members_org ON organization_members(organization_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_org_posts_org ON organization_posts(organization_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_org_follows_user ON organization_follows(follower_id)");
+
+    console.log("[PATCH-E] organizations schema ready");
+  } catch (e) {
+    console.error("[PATCH-E] schema:", e.message);
+  }
+})();
+
+/* ---------- PUBLIC ORGANIZATION ENDPOINTS ---------- */
+
+app.get("/api/v1/organizations", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT id, name, slug, label, description, category, logo_url, cover_url, base_follower_count, blue_check FROM organizations WHERE is_active=1 ORDER BY base_follower_count DESC LIMIT 100"
+    );
+    res.json({ success: true, organizations: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/organizations/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const o = await query("SELECT * FROM organizations WHERE id=$1 OR slug=$1 LIMIT 1", [req.params.id]);
+    if (!o.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const org = o.rows[0];
+    const realFollowers = await query("SELECT COUNT(*) AS c FROM organization_follows WHERE organization_id=$1", [org.id]);
+    const posts = await query("SELECT COUNT(*) AS c FROM organization_posts WHERE organization_id=$1", [org.id]);
+
+    res.json({
+      success: true,
+      organization: org,
+      real_follower_count: Number(realFollowers.rows[0].c || 0),
+      post_count: Number(posts.rows[0].c || 0)
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/organizations/:id/posts", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+
+    const r = await query(
+      "SELECT p.id, p.text, p.created_at, p.author_id, op.organization_id, o.name AS organization_name, o.logo_url AS organization_logo, o.blue_check FROM organization_posts op JOIN posts p ON p.id = op.post_id JOIN organizations o ON o.id = op.organization_id WHERE op.organization_id=$1 AND p.deleted_at IS NULL ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
+      [req.params.id, limit, offset]
+    );
+
+    res.json({ success: true, posts: r.rows, pagination: { limit, offset } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/organizations/:id/follow", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run("INSERT INTO organization_follows (id, organization_id, follower_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [uuidv4(), req.params.id, userId]);
+    res.json({ success: true, following: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/organizations/:id/follow", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run("DELETE FROM organization_follows WHERE organization_id=$1 AND follower_id=$2", [req.params.id, userId]);
+    res.json({ success: true, following: false });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- INVITES ---------- */
+
+app.post("/api/v1/organizations/:id/invite/accept", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM organization_members WHERE organization_id=$1 AND user_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "INVITE_NOT_FOUND" });
+    if (m.rows[0].status === "active") return res.json({ success: true, alreadyMember: true });
+
+    await run("UPDATE organization_members SET status='active', joined_at=CURRENT_TIMESTAMP WHERE id=$1", [m.rows[0].id]);
+    res.json({ success: true, accepted: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/organizations/:id/invite/decline", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    await run("DELETE FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND status='invited'", [req.params.id, userId]);
+    res.json({ success: true, declined: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/me/organizations", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT om.id AS membership_id, om.role, om.status, om.invited_at, om.joined_at, o.id AS organization_id, o.name, o.slug, o.logo_url, o.blue_check FROM organization_members om JOIN organizations o ON o.id = om.organization_id WHERE om.user_id=$1 ORDER BY om.invited_at DESC",
+      [userId]
+    );
+
+    res.json({ success: true, organizations: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ---------- POST AS ORGANIZATION ---------- */
+
+async function getOrgPostLimits(orgId) {
+  try {
+    const { query } = require("./src/db");
+    const o = await query("SELECT daily_post_limit, weekly_post_limit, monthly_post_limit FROM organizations WHERE id=$1 LIMIT 1", [orgId]);
+    if (!o.rows.length) return { daily: 10, weekly: 50, monthly: 200 };
+    return {
+      daily: Number(o.rows[0].daily_post_limit || 10),
+      weekly: Number(o.rows[0].weekly_post_limit || 50),
+      monthly: Number(o.rows[0].monthly_post_limit || 200)
+    };
+  } catch (e) {
+    return { daily: 10, weekly: 50, monthly: 200 };
+  }
+}
+
+async function getOrgPostsUsed(orgId, userId) {
+  try {
+    const { query } = require("./src/db");
+    const daily = await query("SELECT COUNT(*) AS c FROM organization_posts WHERE organization_id=$1 AND posted_by_user_id=$2 AND created_at > datetime('now','start of day')", [orgId, userId]);
+    const weekly = await query("SELECT COUNT(*) AS c FROM organization_posts WHERE organization_id=$1 AND posted_by_user_id=$2 AND created_at > datetime('now','-7 days')", [orgId, userId]);
+    const monthly = await query("SELECT COUNT(*) AS c FROM organization_posts WHERE organization_id=$1 AND posted_by_user_id=$2 AND created_at > datetime('now','-30 days')", [orgId, userId]);
+    return {
+      daily: Number(daily.rows[0].c || 0),
+      weekly: Number(weekly.rows[0].c || 0),
+      monthly: Number(monthly.rows[0].c || 0)
+    };
+  } catch (e) {
+    return { daily: 0, weekly: 0, monthly: 0 };
+  }
+}
+
+app.post("/api/v1/organizations/:id/post", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const member = await query("SELECT * FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND status='active' LIMIT 1", [req.params.id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_AN_ACTIVE_MEMBER" });
+
+    const role = member.rows[0].role;
+    if (!["admin", "editor", "contributor"].includes(role)) {
+      return res.status(403).json({ success: false, error: "ROLE_NOT_ALLOWED" });
+    }
+
+    const limits = await getOrgPostLimits(req.params.id);
+    const used = await getOrgPostsUsed(req.params.id, userId);
+
+    if (used.daily >= limits.daily) return res.status(429).json({ success: false, error: "ORG_DAILY_LIMIT_REACHED", limit: limits.daily, used: used.daily });
+    if (used.weekly >= limits.weekly) return res.status(429).json({ success: false, error: "ORG_WEEKLY_LIMIT_REACHED", limit: limits.weekly, used: used.weekly });
+    if (used.monthly >= limits.monthly) return res.status(429).json({ success: false, error: "ORG_MONTHLY_LIMIT_REACHED", limit: limits.monthly, used: used.monthly });
+
+    const text = String(req.body.text || "").trim();
+    if (!text) return res.status(400).json({ success: false, error: "TEXT_REQUIRED" });
+
+    const postId = uuidv4();
+    await run(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled) VALUES ($1,$2,$3,'public',1,1)",
+      [postId, userId, text]
+    );
+
+    await run(
+      "INSERT INTO organization_posts (id, organization_id, posted_by_user_id, post_id) VALUES ($1,$2,$3,$4)",
+      [uuidv4(), req.params.id, userId, postId]
+    );
+
+    const org = await query("SELECT name, logo_url, blue_check FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+
+    res.status(201).json({
+      success: true,
+      post_id: postId,
+      organization: org.rows[0] || null,
+      posted_by: userId,
+      attribution: "organization",
+      usage: { daily: used.daily + 1, weekly: used.weekly + 1, monthly: used.monthly + 1 },
+      limits
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ORG DASHBOARD (for members) ---------- */
+
+app.get("/api/v1/organizations/:id/dashboard", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const member = await query("SELECT * FROM organization_members WHERE organization_id=$1 AND user_id=$2 AND status='active' LIMIT 1", [req.params.id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_AN_ACTIVE_MEMBER" });
+
+    const org = await query("SELECT * FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!org.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const limits = await getOrgPostLimits(req.params.id);
+    const used = await getOrgPostsUsed(req.params.id, userId);
+
+    const members = await query("SELECT COUNT(*) AS c FROM organization_members WHERE organization_id=$1 AND status='active'", [req.params.id]);
+    const posts = await query("SELECT COUNT(*) AS c FROM organization_posts WHERE organization_id=$1", [req.params.id]);
+    const followers = await query("SELECT COUNT(*) AS c FROM organization_follows WHERE organization_id=$1", [req.params.id]);
+
+    res.json({
+      success: true,
+      organization: org.rows[0],
+      my_role: member.rows[0].role,
+      usage: used,
+      limits,
+      remaining: {
+        daily: Math.max(0, limits.daily - used.daily),
+        weekly: Math.max(0, limits.weekly - used.weekly),
+        monthly: Math.max(0, limits.monthly - used.monthly)
+      },
+      member_count: Number(members.rows[0].c || 0),
+      post_count: Number(posts.rows[0].c || 0),
+      follower_count: Number(followers.rows[0].c || 0)
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- CONTRIBUTED SECTION ---------- */
+
+app.get("/api/v1/users/:id/contributed", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT o.id AS organization_id, o.name, o.slug, o.logo_url, o.blue_check, om.role, om.status, om.joined_at FROM organization_members om JOIN organizations o ON o.id = om.organization_id WHERE om.user_id=$1 AND om.status='active' ORDER BY om.joined_at DESC",
+      [req.params.id]
+    );
+    res.json({ success: true, contributions: r.rows });
+  } catch (err) {
+    res.json({ success: true, contributions: [] });
+  }
+});
+
+/* ---------- BADGE CHECK FOR ORG POSTS ---------- */
+
+app.get("/api/v1/organizations/:id/label", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const o = await query("SELECT name, label, blue_check FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!o.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    res.json({
+      success: true,
+      name: o.rows[0].name,
+      label: o.rows[0].label || ("Verify Connecto Organization"),
+      blue_check: Number(o.rows[0].blue_check || 0) === 1
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ============================================================
+   PATCH E — PART 3
+   Panel-side endpoints: create org, invite, members, limits
+   ==========================================================*/
+
+/* ---------- ADMIN: CREATE ORGANIZATION ---------- */
+
+app.post("/api/v1/admin/organizations", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) {
+      return res.status(403).json({ success: false, error: "ONLY_OWNER_CAN_CREATE_ORGS" });
+    }
+
+    const name = String(req.body.name || "").trim();
+    const slug = String(req.body.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")).slice(0, 60);
+    const label = String(req.body.label || "").trim() || "Verify Connecto Organization";
+    const description = String(req.body.description || "").trim();
+    const category = String(req.body.category || "").trim();
+    const baseFollowers = Number(req.body.base_follower_count || 1000);
+    const dailyLimit = Number(req.body.daily_post_limit || 10);
+    const weeklyLimit = Number(req.body.weekly_post_limit || 50);
+    const monthlyLimit = Number(req.body.monthly_post_limit || 200);
+
+    if (!name || !slug) return res.status(400).json({ success: false, error: "NAME_AND_SLUG_REQUIRED" });
+
+    const existing = await query("SELECT id FROM organizations WHERE lower(slug)=lower($1) OR lower(name)=lower($2) LIMIT 1", [slug, name]);
+    if (existing.rows.length) return res.status(409).json({ success: false, error: "ORGANIZATION_ALREADY_EXISTS" });
+
+    const id = uuidv4();
+    await run(
+      "INSERT INTO organizations (id, name, slug, label, description, category, owner_id, base_follower_count, daily_post_limit, weekly_post_limit, monthly_post_limit, blue_check) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)",
+      [id, name, slug, label, description, category, userId, baseFollowers, dailyLimit, weeklyLimit, monthlyLimit]
+    );
+
+    await run(
+      "INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by, joined_at) VALUES ($1,$2,$3,'admin','active',$4,CURRENT_TIMESTAMP)",
+      [uuidv4(), id, userId, userId]
+    );
+
+    res.status(201).json({ success: true, organization_id: id, name, slug });
+  } catch (err) {
+    console.error("[ADMIN-ORG-CREATE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: LIST ALL ORGANIZATIONS ---------- */
+
+app.get("/api/v1/admin/organizations", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    const r = await query("SELECT * FROM organizations ORDER BY created_at DESC LIMIT 100");
+    res.json({ success: true, organizations: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: INVITE MEMBER ---------- */
+
+app.post("/api/v1/admin/organizations/:id/invite", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    const username = String(req.body.username || "").trim();
+    const role = String(req.body.role || "contributor").trim();
+    if (!username) return res.status(400).json({ success: false, error: "USERNAME_REQUIRED" });
+    if (!["admin", "editor", "contributor"].includes(role)) return res.status(400).json({ success: false, error: "INVALID_ROLE" });
+
+    const target = await query("SELECT id, first_name FROM users WHERE lower(username)=lower($1) LIMIT 1", [username]);
+    if (!target.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+
+    const org = await query("SELECT name FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!org.rows.length) return res.status(404).json({ success: false, error: "ORG_NOT_FOUND" });
+
+    const existing = await query("SELECT * FROM organization_members WHERE organization_id=$1 AND user_id=$2 LIMIT 1", [req.params.id, target.rows[0].id]);
+    if (existing.rows.length && existing.rows[0].status === "active") {
+      return res.status(409).json({ success: false, error: "ALREADY_MEMBER" });
+    }
+
+    if (existing.rows.length) {
+      await run("UPDATE organization_members SET role=$1, status='invited', invited_by=$2, invited_at=CURRENT_TIMESTAMP WHERE id=$3", [role, userId, existing.rows[0].id]);
+    } else {
+      await run(
+        "INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by) VALUES ($1,$2,$3,$4,'invited',$5)",
+        [uuidv4(), req.params.id, target.rows[0].id, role, userId]
+      );
+    }
+
+    try {
+      const { notify } = require("./src/services/notifications");
+      if (notify) {
+        await notify({
+          userId: target.rows[0].id,
+          actorId: userId,
+          type: "ORG_INVITE",
+          title: "Organization invite",
+          body: "You have been invited to join " + org.rows[0].name,
+          targetType: "organization",
+          targetId: req.params.id
+        });
+      }
+    } catch (e) { /* notifications optional */ }
+
+    res.json({ success: true, invited: true, invited_user_id: target.rows[0].id, role });
+  } catch (err) {
+    console.error("[ADMIN-ORG-INVITE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: LIST MEMBERS ---------- */
+
+app.get("/api/v1/admin/organizations/:id/members", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    const r = await query(
+      "SELECT om.id, om.role, om.status, om.invited_at, om.joined_at, u.id AS user_id, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM organization_members om JOIN users u ON u.id = om.user_id WHERE om.organization_id=$1 ORDER BY om.invited_at DESC",
+      [req.params.id]
+    );
+
+    res.json({ success: true, members: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: REMOVE MEMBER ---------- */
+
+app.delete("/api/v1/admin/organizations/:id/members/:userId", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    await run("DELETE FROM organization_members WHERE organization_id=$1 AND user_id=$2", [req.params.id, req.params.userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: UPDATE ORGANIZATION LIMITS ---------- */
+
+app.patch("/api/v1/admin/organizations/:id", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    const allowed = ["name", "label", "description", "category", "logo_url", "cover_url", "base_follower_count", "daily_post_limit", "weekly_post_limit", "monthly_post_limit", "is_active"];
+    const fields = [];
+    const values = [];
+    let n = 1;
+
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) {
+        fields.push(k + "=$" + n++);
+        values.push(req.body[k]);
+      }
+    }
+
+    if (!fields.length) return res.status(400).json({ success: false, error: "NO_FIELDS" });
+    values.push(req.params.id);
+
+    await run("UPDATE organizations SET " + fields.join(", ") + ", updated_at=CURRENT_TIMESTAMP WHERE id=$" + n, values);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: DELETE ORGANIZATION ---------- */
+
+app.delete("/api/v1/admin/organizations/:id", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    await run("UPDATE organizations SET is_active=0, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ADMIN: SEED 20 OFFICIAL ORGANIZATIONS ---------- */
+
+const DEFAULT_ORGS = [
+  { name: "Connecto News", category: "news" },
+  { name: "Connecto Football", category: "sports" },
+  { name: "Connecto Sports", category: "sports" },
+  { name: "Connecto Music", category: "music" },
+  { name: "Connecto Movies", category: "movies" },
+  { name: "Connecto TV", category: "entertainment" },
+  { name: "Connecto Tech", category: "tech" },
+  { name: "Connecto Business", category: "business" },
+  { name: "Connecto Politics", category: "news" },
+  { name: "Connecto Health", category: "health" },
+  { name: "Connecto Fashion", category: "lifestyle" },
+  { name: "Connecto Food", category: "lifestyle" },
+  { name: "Connecto Travel", category: "lifestyle" },
+  { name: "Connecto Education", category: "education" },
+  { name: "Connecto Jobs", category: "careers" },
+  { name: "Connecto Gaming", category: "gaming" },
+  { name: "Connecto Comedy", category: "entertainment" },
+  { name: "Connecto Gospel", category: "religion" },
+  { name: "Connecto Africa", category: "regional" },
+  { name: "Connecto Nigeria", category: "regional" }
+];
+
+app.post("/api/v1/admin/organizations/seed", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const me = await query("SELECT is_owner FROM users WHERE id=$1 LIMIT 1", [userId]);
+    if (!me.rows.length || !me.rows[0].is_owner) return res.status(403).json({ success: false, error: "ONLY_OWNER" });
+
+    let created = 0;
+    let skipped = 0;
+
+    for (const org of DEFAULT_ORGS) {
+      const slug = org.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const existing = await query("SELECT id FROM organizations WHERE lower(slug)=lower($1) LIMIT 1", [slug]);
+      if (existing.rows.length) { skipped++; continue; }
+
+      const id = uuidv4();
+      await run(
+        "INSERT INTO organizations (id, name, slug, label, category, owner_id, base_follower_count, daily_post_limit, weekly_post_limit, monthly_post_limit, blue_check) VALUES ($1,$2,$3,'Verify Connecto Organization',$4,$5,1000,10,50,200,1)",
+        [id, org.name, slug, org.category, userId]
+      );
+      await run(
+        "INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by, joined_at) VALUES ($1,$2,$3,'admin','active',$4,CURRENT_TIMESTAMP)",
+        [uuidv4(), id, userId, userId]
+      );
+      created++;
+    }
+
+    res.json({ success: true, created, skipped, total: DEFAULT_ORGS.length });
+  } catch (err) {
+    console.error("[ADMIN-ORG-SEED]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
