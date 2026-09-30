@@ -1,0 +1,254 @@
+/* ============================================================
+   PATCH F — CONTROL PANEL BACKEND
+   Organizations, verification, display numbers, feature flags
+   ==========================================================*/
+
+/* ---------- ORGANIZATIONS (CONTROL API) ---------- */
+
+app.get("/control-api/organizations", controlAuth, async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query("SELECT * FROM organizations ORDER BY created_at DESC LIMIT 200");
+    res.json({ success: true, organizations: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/control-api/organizations", controlAuth, async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const name = String(req.body.name || "").trim();
+    const slug = String(req.body.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")).slice(0, 60);
+    const label = String(req.body.label || "Verify Connecto Organization").trim();
+    const description = String(req.body.description || "").trim();
+    const category = String(req.body.category || "").trim();
+    const baseFollowers = Number(req.body.base_follower_count || 1000);
+    const dailyLimit = Number(req.body.daily_post_limit || 10);
+    const weeklyLimit = Number(req.body.weekly_post_limit || 50);
+    const monthlyLimit = Number(req.body.monthly_post_limit || 200);
+
+    if (!name || !slug) return res.status(400).json({ success: false, error: "NAME_AND_SLUG_REQUIRED" });
+
+    const existing = await query("SELECT id FROM organizations WHERE lower(slug)=lower($1) OR lower(name)=lower($2) LIMIT 1", [slug, name]);
+    if (existing.rows.length) return res.status(409).json({ success: false, error: "ALREADY_EXISTS" });
+
+    const id = uuidv4();
+    await run(
+      "INSERT INTO organizations (id, name, slug, label, description, category, owner_id, base_follower_count, daily_post_limit, weekly_post_limit, monthly_post_limit, blue_check) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)",
+      [id, name, slug, label, description, category, req.admin.id, baseFollowers, dailyLimit, weeklyLimit, monthlyLimit]
+    );
+
+    await run(
+      "INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by, joined_at) VALUES ($1,$2,$3,'admin','active',$4,CURRENT_TIMESTAMP)",
+      [uuidv4(), id, req.admin.id, req.admin.id]
+    );
+
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_CREATED", targetType: "organization", targetId: id, targetLabel: name, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+
+    res.status(201).json({ success: true, id, name, slug });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.patch("/control-api/organizations/:id", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const allowed = ["name", "label", "description", "category", "logo_url", "cover_url", "base_follower_count", "daily_post_limit", "weekly_post_limit", "monthly_post_limit", "blue_check", "is_active"];
+    const fields = [];
+    const values = [];
+    let n = 1;
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) { fields.push(k + "=$" + n++); values.push(req.body[k]); }
+    }
+    if (!fields.length) return res.status(400).json({ success: false, error: "NO_FIELDS" });
+    values.push(req.params.id);
+    await run("UPDATE organizations SET " + fields.join(", ") + ", updated_at=CURRENT_TIMESTAMP WHERE id=$" + n, values);
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_UPDATED", targetType: "organization", targetId: req.params.id, newValue: req.body, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/control-api/organizations/:id", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    await run("UPDATE organizations SET is_active=0, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_DEACTIVATED", targetType: "organization", targetId: req.params.id, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/control-api/organizations/:id/members", controlAuth, async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT om.id, om.role, om.status, om.invited_at, om.joined_at, u.id AS user_id, u.username, u.first_name, u.surname FROM organization_members om JOIN users u ON u.id = om.user_id WHERE om.organization_id=$1 ORDER BY om.invited_at DESC",
+      [req.params.id]
+    );
+    res.json({ success: true, members: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/control-api/organizations/:id/invite", controlAuth, async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const username = String(req.body.username || "").trim();
+    const role = String(req.body.role || "contributor").trim();
+    if (!username) return res.status(400).json({ success: false, error: "USERNAME_REQUIRED" });
+    if (!["admin","editor","contributor"].includes(role)) return res.status(400).json({ success: false, error: "INVALID_ROLE" });
+
+    const target = await query("SELECT id FROM users WHERE lower(username)=lower($1) LIMIT 1", [username]);
+    if (!target.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+
+    const org = await query("SELECT name FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!org.rows.length) return res.status(404).json({ success: false, error: "ORG_NOT_FOUND" });
+
+    const existing = await query("SELECT * FROM organization_members WHERE organization_id=$1 AND user_id=$2 LIMIT 1", [req.params.id, target.rows[0].id]);
+    if (existing.rows.length && existing.rows[0].status === "active") return res.status(409).json({ success: false, error: "ALREADY_MEMBER" });
+
+    if (existing.rows.length) {
+      await run("UPDATE organization_members SET role=$1, status='invited', invited_by=$2, invited_at=CURRENT_TIMESTAMP WHERE id=$3", [role, req.admin.id, existing.rows[0].id]);
+    } else {
+      await run("INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by) VALUES ($1,$2,$3,$4,'invited',$5)", [uuidv4(), req.params.id, target.rows[0].id, role, req.admin.id]);
+    }
+
+    try {
+      const { notify } = require("./src/services/notifications");
+      if (notify) {
+        await notify({
+          userId: target.rows[0].id,
+          actorId: req.admin.id,
+          type: "ORG_INVITE",
+          title: "Organization invite",
+          body: "You have been invited to join " + org.rows[0].name,
+          targetType: "organization",
+          targetId: req.params.id
+        });
+      }
+    } catch (e) {}
+
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_INVITED", targetType: "organization", targetId: req.params.id, targetLabel: org.rows[0].name, newValue: { username, role }, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true, invited: true, user_id: target.rows[0].id, role });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/control-api/organizations/:id/members/:userId", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    await run("DELETE FROM organization_members WHERE organization_id=$1 AND user_id=$2", [req.params.id, req.params.userId]);
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_MEMBER_REMOVED", targetType: "organization", targetId: req.params.id, newValue: { userId: req.params.userId }, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/control-api/organizations/seed", controlAuth, async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const DEFAULT_ORGS = [
+      { name: "Connecto News", category: "news" }, { name: "Connecto Football", category: "sports" },
+      { name: "Connecto Sports", category: "sports" }, { name: "Connecto Music", category: "music" },
+      { name: "Connecto Movies", category: "movies" }, { name: "Connecto TV", category: "entertainment" },
+      { name: "Connecto Tech", category: "tech" }, { name: "Connecto Business", category: "business" },
+      { name: "Connecto Politics", category: "news" }, { name: "Connecto Health", category: "health" },
+      { name: "Connecto Fashion", category: "lifestyle" }, { name: "Connecto Food", category: "lifestyle" },
+      { name: "Connecto Travel", category: "lifestyle" }, { name: "Connecto Education", category: "education" },
+      { name: "Connecto Jobs", category: "careers" }, { name: "Connecto Gaming", category: "gaming" },
+      { name: "Connecto Comedy", category: "entertainment" }, { name: "Connecto Gospel", category: "religion" },
+      { name: "Connecto Africa", category: "regional" }, { name: "Connecto Nigeria", category: "regional" }
+    ];
+    let created = 0, skipped = 0;
+    for (const org of DEFAULT_ORGS) {
+      const slug = org.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const existing = await query("SELECT id FROM organizations WHERE lower(slug)=lower($1) LIMIT 1", [slug]);
+      if (existing.rows.length) { skipped++; continue; }
+      const id = uuidv4();
+      await run("INSERT INTO organizations (id, name, slug, label, category, owner_id, base_follower_count, daily_post_limit, weekly_post_limit, monthly_post_limit, blue_check) VALUES ($1,$2,$3,'Verify Connecto Organization',$4,$5,1000,10,50,200,1)", [id, org.name, slug, org.category, req.admin.id]);
+      await run("INSERT INTO organization_members (id, organization_id, user_id, role, status, invited_by, joined_at) VALUES ($1,$2,$3,'admin','active',$4,CURRENT_TIMESTAMP)", [uuidv4(), id, req.admin.id, req.admin.id]);
+      created++;
+    }
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "ORG_SEEDED", newValue: { created, skipped }, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true, created, skipped });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- VERIFY / UNVERIFY USER ---------- */
+
+app.post("/control-api/users/:id/verify", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const label = String(req.body.label || "Verified Account");
+    await run("UPDATE users SET is_verified=1, verified_label=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2", [label, req.params.id]);
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "USER_VERIFIED", targetType: "user", targetId: req.params.id, newValue: { label }, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/control-api/users/:id/verify", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    await run("UPDATE users SET is_verified=0, verified_label=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "USER_UNVERIFIED", targetType: "user", targetId: req.params.id, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DISPLAY NUMBERS (fake followers / likes) ---------- */
+
+app.post("/control-api/users/:id/display-numbers", controlAuth, async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const f = req.body.followers;
+    const fg = req.body.following;
+    const l = req.body.likes;
+    await run(
+      "UPDATE users SET display_followers=$1, display_following=$2, display_likes=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4",
+      [f ?? null, fg ?? null, l ?? null, req.params.id]
+    );
+    await audit({ adminId: req.admin.id, adminEmail: req.admin.email, action: "DISPLAY_NUMBERS_SET", targetType: "user", targetId: req.params.id, newValue: { followers: f, following: fg, likes: l }, ip: req.ip, userAgent: req.headers["user-agent"] || null });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- SEARCH USERS (for panel) ---------- */
+
+app.get("/control-api/users/search", controlAuth, async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    if (!q) {
+      const r = await query("SELECT id, email, username, first_name, surname, is_verified, is_owner, account_status FROM users ORDER BY created_at DESC LIMIT $1", [limit]);
+      return res.json({ success: true, users: r.rows });
+    }
+    const r = await query(
+      "SELECT id, email, username, first_name, surname, is_verified, is_owner, account_status FROM users WHERE lower(email) LIKE lower($1) OR lower(username) LIKE lower($1) LIMIT $2",
+      ["%" + q + "%", limit]
+    );
+    res.json({ success: true, users: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
