@@ -1344,6 +1344,424 @@ app.delete("/api/v1/messages/:id", async (req, res) => {
   }
 })();
 
+/* ============================================================
+   PATCH C — MEDIA UPLOAD (ImgBB for profile, B2 for posts)
+   Uses: getProviderCredential() from server.js
+   ==========================================================*/
+
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
+async function getActiveStorageCredential() {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT * FROM provider_credentials WHERE category='storage' AND is_active=1 ORDER BY is_primary DESC, priority ASC LIMIT 5"
+    );
+    if (!r.rows.length) return [];
+    const out = [];
+    for (const row of r.rows) {
+      try {
+        const KEY = process.env.CONTROL_ENCRYPTION_KEY;
+        if (!KEY) continue;
+        const raw = Buffer.from(row.credentials_enc, "base64");
+        const iv = raw.subarray(0, 12);
+        const tag = raw.subarray(12, 28);
+        const data = raw.subarray(28);
+        const decipher = cryptoA.createDecipheriv("aes-256-gcm", Buffer.from(KEY, "hex"), iv);
+        decipher.setAuthTag(tag);
+        const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+        const cred = JSON.parse(decrypted.toString("utf8"));
+        out.push({ id: row.id, provider: row.provider, cred: cred });
+      } catch (e) { /* skip broken */ }
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+function makeB2Client(cred) {
+  return new S3Client({
+    endpoint: cred.endpoint,
+    region: cred.region,
+    credentials: {
+      accessKeyId: cred.keyId,
+      secretAccessKey: cred.applicationKey
+    },
+    forcePathStyle: true
+  });
+}
+
+async function uploadToImgBB(cred, base64, name) {
+  const form = new FormData();
+  form.append("image", base64);
+  if (name) form.append("name", name);
+  form.append("key", cred.apiKey || cred.api_key);
+
+  const resp = await fetch("https://api.imgbb.com/1/upload", {
+    method: "POST",
+    body: form
+  });
+  const data = await resp.json();
+  if (!data.success) {
+    throw new Error("ImgBB: " + (data.error && data.error.message ? data.error.message : "upload failed"));
+  }
+  return {
+    url: data.data.url,
+    thumb: data.data.thumb && data.data.thumb.url,
+    delete_url: data.data.delete_url,
+    storage_key: data.data.id
+  };
+}
+
+async function signB2Put(cred, key, contentType) {
+  const s3 = makeB2Client(cred);
+  const cmd = new PutObjectCommand({
+    Bucket: cred.bucket,
+    Key: key,
+    ContentType: contentType
+  });
+  const url = await getSignedUrl(s3, cmd, { expiresIn: 900 });
+  return url;
+}
+
+async function signB2Get(cred, key, seconds) {
+  const s3 = makeB2Client(cred);
+  const cmd = new GetObjectCommand({
+    Bucket: cred.bucket,
+    Key: key
+  });
+  return getSignedUrl(s3, cmd, { expiresIn: seconds || 3600 });
+}
+
+/* ---------- PROFILE PHOTO UPLOAD (ImgBB) ---------- */
+
+app.post("/api/v1/media/profile-upload", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const { image_base64, mime_type, kind } = req.body;
+    if (!image_base64 || !mime_type) return res.status(400).json({ success: false, error: "IMAGE_AND_MIME_REQUIRED" });
+    if (!mime_type.startsWith("image/")) return res.status(400).json({ success: false, error: "ONLY_IMAGES_ALLOWED" });
+
+    const creds = await getActiveStorageCredential();
+    const imgbb = creds.find(function (c) { return c.provider === "imgbb"; });
+    if (!imgbb) return res.status(503).json({ success: false, error: "NO_IMGBB_CREDENTIAL" });
+
+    const uploaded = await uploadToImgBB(imgbb.cred, image_base64, "connecto-" + userId);
+
+    const mediaId = uuidv4();
+    await run(
+      "INSERT INTO media (id, owner_id, type, mime_type, storage_key, processing_status, visibility) VALUES ($1,$2,'image',$3,$4,'ready','public')",
+      [mediaId, userId, mime_type, uploaded.url]
+    );
+
+    const field = kind === "cover" ? "cover_photo_media_id" : "profile_photo_media_id";
+    await run("UPDATE users SET " + field + "=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2", [uploaded.url, userId]);
+
+    res.json({
+      success: true,
+      media_id: mediaId,
+      url: uploaded.url,
+      thumb: uploaded.thumb,
+      kind: kind || "profile"
+    });
+  } catch (err) {
+    console.error("[PROFILE-UPLOAD]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- POST MEDIA UPLOAD (B2 presigned) ---------- */
+
+app.post("/api/v1/media/upload-url", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const { content_type, file_size, media_type } = req.body;
+    if (!content_type) return res.status(400).json({ success: false, error: "CONTENT_TYPE_REQUIRED" });
+
+    const isImage = content_type.startsWith("image/");
+    const isVideo = content_type.startsWith("video/");
+    if (!isImage && !isVideo) return res.status(400).json({ success: false, error: "UNSUPPORTED_MEDIA_TYPE" });
+
+    if (isImage && file_size && file_size > 25 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: "IMAGE_TOO_LARGE" });
+    }
+    if (isVideo && file_size && file_size > 500 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: "VIDEO_TOO_LARGE" });
+    }
+
+    const creds = await getActiveStorageCredential();
+    const b2 = creds.find(function (c) { return c.provider === "b2"; });
+    if (!b2) return res.status(503).json({ success: false, error: "NO_B2_CREDENTIAL" });
+
+    const ext = content_type.split("/")[1] || "bin";
+    const key = "users/" + userId + "/" + Date.now() + "-" + uuidv4() + "." + ext;
+
+    const putUrl = await signB2Put(b2.cred, key, content_type);
+
+    const mediaId = uuidv4();
+    await run(
+      "INSERT INTO media (id, owner_id, type, mime_type, size, storage_key, processing_status, visibility) VALUES ($1,$2,$3,$4,$5,$6,'pending','private')",
+      [mediaId, userId, isImage ? "image" : "video", content_type, file_size || 0, key]
+    );
+
+    res.json({
+      success: true,
+      media_id: mediaId,
+      upload_url: putUrl,
+      storage_key: key,
+      method: "PUT",
+      headers: { "Content-Type": content_type },
+      expires_in: 900
+    });
+  } catch (err) {
+    console.error("[UPLOAD-URL]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/media/:id/complete", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM media WHERE id=$1 AND owner_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    await run("UPDATE media SET processing_status='ready' WHERE id=$1", [req.params.id]);
+
+    const creds = await getActiveStorageCredential();
+    const b2 = creds.find(function (c) { return c.provider === "b2"; });
+    let viewUrl = null;
+    if (b2) {
+      try { viewUrl = await signB2Get(b2.cred, m.rows[0].storage_key, 3600); } catch (e) {}
+    }
+
+    res.json({ success: true, media_id: req.params.id, view_url: viewUrl });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/media/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const m = await query("SELECT * FROM media WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    const row = m.rows[0];
+
+    if (row.storage_key && row.storage_key.indexOf("http") === 0) {
+      return res.json({ success: true, media: row, view_url: row.storage_key });
+    }
+
+    const creds = await getActiveStorageCredential();
+    const b2 = creds.find(function (c) { return c.provider === "b2"; });
+    if (!b2) return res.status(503).json({ success: false, error: "NO_B2_CREDENTIAL" });
+
+    const viewUrl = await signB2Get(b2.cred, row.storage_key, 3600);
+    res.json({ success: true, media: row, view_url: viewUrl });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/media/:id/attach", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const postId = String(req.body.post_id || "");
+    if (!postId) return res.status(400).json({ success: false, error: "POST_ID_REQUIRED" });
+
+    const m = await query("SELECT * FROM media WHERE id=$1 AND owner_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const p = await query("SELECT * FROM posts WHERE id=$1 AND author_id=$2 LIMIT 1", [postId, userId]);
+    if (!p.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND_OR_NOT_OWNER" });
+
+    await run("UPDATE media SET post_id=$1, visibility='public' WHERE id=$2", [postId, req.params.id]);
+
+    res.json({ success: true, media_id: req.params.id, post_id: postId });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/media/:id", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM media WHERE id=$1 AND owner_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const row = m.rows[0];
+    if (row.storage_key && row.storage_key.indexOf("http") !== 0) {
+      try {
+        const creds = await getActiveStorageCredential();
+        const b2 = creds.find(function (c) { return c.provider === "b2"; });
+        if (b2) {
+          const s3 = makeB2Client(b2.cred);
+          await s3.send(new DeleteObjectCommand({ Bucket: b2.cred.bucket, Key: row.storage_key }));
+        }
+      } catch (e) { /* best effort */ }
+    }
+
+    await run("UPDATE media SET deleted_at=CURRENT_TIMESTAMP WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ============================================================
+   PATCH C — PART 2
+   Schema check, error handlers, cleanup job
+   ==========================================================*/
+
+/* ---------- MEDIA SCHEMA SAFETY CHECK ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+
+    const cols = [
+      { name: "processing_status", type: "TEXT DEFAULT 'pending'" },
+      { name: "visibility", type: "TEXT DEFAULT 'private'" },
+      { name: "thumbnail_key", type: "TEXT" },
+      { name: "width", type: "INTEGER" },
+      { name: "height", type: "INTEGER" },
+      { name: "duration", type: "REAL" }
+    ];
+
+    for (const c of cols) {
+      try {
+        await run("ALTER TABLE media ADD COLUMN " + c.name + " " + c.type);
+      } catch (e) {
+        /* column already exists — ignore */
+      }
+    }
+
+    await run("CREATE INDEX IF NOT EXISTS idx_media_post ON media(post_id)");
+    await run("CREATE INDEX IF NOT EXISTS idx_media_owner ON media(owner_id)");
+
+    console.log("[PATCH-C] media schema ready");
+  } catch (e) {
+    console.error("[PATCH-C] media schema:", e.message);
+  }
+})();
+
+/* ---------- ORPHAN MEDIA CLEANUP JOB ---------- */
+/* Deletes media rows that are older than 24h and were never attached to a post */
+
+let __patchCInterval = null;
+
+function startPatchCCleanupJob() {
+  if (__patchCInterval) return;
+
+  __patchCInterval = setInterval(async () => {
+    try {
+      const { query, run } = require("./src/db");
+
+      const orphans = await query(
+        "SELECT id, storage_key FROM media WHERE post_id IS NULL AND processing_status='pending' AND created_at < datetime('now','-1 day') LIMIT 50"
+      );
+
+      if (!orphans.rows.length) return;
+
+      const creds = await getActiveStorageCredential();
+      const b2 = creds.find(function (c) { return c.provider === "b2"; });
+
+      for (const row of orphans.rows) {
+        if (b2 && row.storage_key && row.storage_key.indexOf("http") !== 0) {
+          try {
+            const s3 = makeB2Client(b2.cred);
+            await s3.send(new DeleteObjectCommand({ Bucket: b2.cred.bucket, Key: row.storage_key }));
+          } catch (e) { /* best effort */ }
+        }
+        await run("UPDATE media SET deleted_at=CURRENT_TIMESTAMP WHERE id=$1", [row.id]);
+      }
+
+      console.log("[PATCH-C CLEANUP] Removed", orphans.rows.length, "orphan media");
+    } catch (e) {
+      console.error("[PATCH-C CLEANUP]", e.message);
+    }
+  }, 3600000); /* every hour */
+}
+
+if (typeof app !== "undefined") {
+  startPatchCCleanupJob();
+}
+
+/* ---------- PROVIDER-SPECIFIC TEST ENDPOINTS ---------- */
+
+app.post("/api/v1/media/test-imgbb", async (req, res) => {
+  try {
+    const creds = await getActiveStorageCredential();
+    const imgbb = creds.find(function (c) { return c.provider === "imgbb"; });
+    if (!imgbb) return res.status(503).json({ success: false, error: "NO_IMGBB_CREDENTIAL" });
+
+    const tiny =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    const result = await uploadToImgBB(imgbb.cred, tiny, "connecto-test");
+    res.json({ success: true, url: result.url });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/media/test-b2", async (req, res) => {
+  try {
+    const creds = await getActiveStorageCredential();
+    const b2 = creds.find(function (c) { return c.provider === "b2"; });
+    if (!b2) return res.status(503).json({ success: false, error: "NO_B2_CREDENTIAL" });
+
+    const key = "connecto-test/" + Date.now() + ".txt";
+    console.log("[test-b2] cred:", JSON.stringify({endpoint: b2.cred.endpoint, region: b2.cred.region, bucket: b2.cred.bucket, hasKeyId: !!b2.cred.keyId, hasAppKey: !!b2.cred.applicationKey}));
+    const url = await signB2Put(b2.cred, key, "text/plain");
+
+    res.json({ success: true, upload_url: url, storage_key: key });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
