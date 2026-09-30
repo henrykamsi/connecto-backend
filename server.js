@@ -7,6 +7,7 @@ const env = require("./src/config/env");
 const { query } = require("./src/db");
 const { attachRealtime } = require("./src/websocket/realtime");
 const v1 = require("./src/routes/complete-v1");
+const controlRouter = require("./control-server");
 
 const app = express();
 const server = http.createServer(app);
@@ -38,6 +39,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/v1", v1);
+app.use("/control-api", controlRouter);
 
 app.use((err, req, res, next) => {
   console.error("[CONNECTO ERROR]", err);
