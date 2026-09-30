@@ -882,6 +882,468 @@ function startPatchARetryJob() {
 if (typeof app !== "undefined") {
   startPatchARetryJob();
 }
+/* ============================================================
+   PATCH B — PROFILES, SEARCH, MUTE, NOTIFICATION PREFS
+   Uses existing helpers: cryptoA, sha256Hex, sendBrevoEmail
+   ==========================================================*/
+
+/* ---------- PUBLIC PROFILE VIEW ---------- */
+
+app.get("/api/v1/users/by-username/:username", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const u = await query(
+      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id, account_status FROM users WHERE lower(username)=lower($1) AND deleted_at IS NULL LIMIT 1",
+      [req.params.username]
+    );
+    if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    res.json({ success: true, user: u.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const u = await query(
+      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id, account_status FROM users WHERE id=$1 AND deleted_at IS NULL LIMIT 1",
+      [req.params.id]
+    );
+    if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    res.json({ success: true, user: u.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id/posts", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const r = await query(
+      "SELECT p.*, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.author_id=$1 AND p.deleted_at IS NULL AND p.audience='public' ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
+      [req.params.id, limit, offset]
+    );
+    res.json({ success: true, posts: r.rows, pagination: { limit, offset } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id/followers", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const r = await query(
+      "SELECT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.follower_id WHERE f.following_id=$1 ORDER BY f.created_at DESC LIMIT $2",
+      [req.params.id, limit]
+    );
+    res.json({ success: true, followers: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id/following", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const r = await query(
+      "SELECT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.following_id WHERE f.follower_id=$1 ORDER BY f.created_at DESC LIMIT $2",
+      [req.params.id, limit]
+    );
+    res.json({ success: true, following: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id/stats", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const followers = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [req.params.id]);
+    const following = await query("SELECT COUNT(*) AS c FROM follows WHERE follower_id=$1", [req.params.id]);
+    const posts = await query("SELECT COUNT(*) AS c FROM posts WHERE author_id=$1 AND deleted_at IS NULL", [req.params.id]);
+    const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1", [req.params.id]);
+    res.json({
+      success: true,
+      stats: {
+        followers: Number(followers.rows[0].c || 0),
+        following: Number(following.rows[0].c || 0),
+        posts: Number(posts.rows[0].c || 0),
+        friends: Number(friends.rows[0].c || 0)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/users/:id/contributed", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT om.organization_id, o.name AS organization_name, om.role, om.joined_at FROM organization_members om JOIN organizations o ON o.id = om.organization_id WHERE om.user_id=$1 ORDER BY om.joined_at DESC",
+      [req.params.id]
+    );
+    res.json({ success: true, contributions: r.rows });
+  } catch (err) {
+    // If organizations table doesn't exist yet, return empty
+    res.json({ success: true, contributions: [] });
+  }
+});
+
+/* ---------- SEARCH ---------- */
+
+app.get("/api/v1/search/users", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    if (!q) return res.json({ success: true, users: [] });
+    const r = await query(
+      "SELECT id, first_name, surname, username, bio, category, country, profile_photo_media_id FROM users WHERE account_status='active' AND deleted_at IS NULL AND (lower(username) LIKE lower($1) OR lower(first_name) LIKE lower($1) OR lower(surname) LIKE lower($1)) ORDER BY created_at DESC LIMIT $2",
+      ["%" + q + "%", limit]
+    );
+    res.json({ success: true, users: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/search/posts", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    if (!q) return res.json({ success: true, posts: [] });
+    const r = await query(
+      "SELECT p.id, p.text, p.author_id, p.created_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.deleted_at IS NULL AND p.audience='public' AND lower(p.text) LIKE lower($1) ORDER BY p.created_at DESC LIMIT $2",
+      ["%" + q + "%", limit]
+    );
+    res.json({ success: true, posts: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/search/tags", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.json({ success: true, tags: [] });
+    const r = await query(
+      "SELECT id, text, author_id, created_at FROM posts WHERE deleted_at IS NULL AND audience='public' AND lower(text) LIKE lower($1) ORDER BY created_at DESC LIMIT 50",
+      ["%#" + q + "%"]
+    );
+    res.json({ success: true, tags: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MUTE ---------- */
+
+app.post("/api/v1/users/:id/mute", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    if (userId === req.params.id) return res.status(400).json({ success: false, error: "CANNOT_MUTE_SELF" });
+    await run("INSERT INTO mutes (id, muter_id, muted_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [uuidv4(), userId, req.params.id]);
+    res.json({ success: true, muted: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/users/:id/mute", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    await run("DELETE FROM mutes WHERE muter_id=$1 AND muted_id=$2", [userId, req.params.id]);
+    res.json({ success: true, muted: false });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+/* ---------- MY FOLLOWERS / FOLLOWING / FRIEND REQUESTS ---------- */
+
+app.get("/api/v1/me/followers", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const r = await query(
+      "SELECT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.follower_id WHERE f.following_id=$1 ORDER BY f.created_at DESC LIMIT $2",
+      [userId, limit]
+    );
+    res.json({ success: true, followers: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/me/following", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const r = await query(
+      "SELECT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM follows f JOIN users u ON u.id = f.following_id WHERE f.follower_id=$1 ORDER BY f.created_at DESC LIMIT $2",
+      [userId, limit]
+    );
+    res.json({ success: true, following: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/me/friend-requests", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const r = await query(
+      "SELECT fr.id, fr.sender_id, fr.status, fr.created_at, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM friend_requests fr JOIN users u ON u.id = fr.sender_id WHERE fr.receiver_id=$1 AND fr.status='pending' ORDER BY fr.created_at DESC",
+      [userId]
+    );
+    res.json({ success: true, requests: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/me/friend-requests/:id", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    await run("UPDATE friend_requests SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND (sender_id=$2 OR receiver_id=$2)", [req.params.id, userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- NOTIFICATION PREFERENCES ---------- */
+
+app.get("/api/v1/notifications/preferences", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const r = await query("SELECT * FROM notification_preferences WHERE user_id=$1 LIMIT 1", [userId]);
+    if (!r.rows.length) {
+      return res.json({
+        success: true,
+        preferences: {
+          push_enabled: 1,
+          email_enabled: 1,
+          follows_enabled: 1,
+          friend_requests_enabled: 1,
+          messages_enabled: 1,
+          comments_enabled: 1,
+          reactions_enabled: 1
+        }
+      });
+    }
+    res.json({ success: true, preferences: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.patch("/api/v1/notifications/preferences", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const allowed = ["push_enabled","email_enabled","follows_enabled","friend_requests_enabled","messages_enabled","comments_enabled","reactions_enabled"];
+    const fields = [];
+    const values = [];
+    let n = 1;
+
+    for (const k of allowed) {
+      if (req.body[k] !== undefined) {
+        fields.push(k + "=$" + n++);
+        values.push(req.body[k] ? 1 : 0);
+      }
+    }
+    if (!fields.length) return res.status(400).json({ success: false, error: "NO_FIELDS" });
+
+    await run("INSERT INTO notification_preferences (user_id) VALUES ($1) ON CONFLICT DO NOTHING", [userId]);
+    values.push(userId);
+    await run("UPDATE notification_preferences SET " + fields.join(", ") + ", updated_at=CURRENT_TIMESTAMP WHERE user_id=$" + n, values);
+
+    const r = await require("./src/db").query("SELECT * FROM notification_preferences WHERE user_id=$1 LIMIT 1", [userId]);
+    res.json({ success: true, preferences: r.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/notifications/:id/read", async (req, res) => {
+  try {
+    const { run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    await run("UPDATE notifications SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP) WHERE id=$1 AND recipient_id=$2", [req.params.id, userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- CHAT EXTRAS ---------- */
+
+app.get("/api/v1/chat/conversations/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [req.params.id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+    const c = await query("SELECT * FROM conversations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!c.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    res.json({ success: true, conversation: c.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/messages/:id/read", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const m = await query("SELECT * FROM messages WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [m.rows[0].conversation_id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+    await run("UPDATE messages SET seen_at=COALESCE(seen_at,CURRENT_TIMESTAMP) WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/messages/:id/reactions", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const type = String(req.body.type || "like").slice(0, 20);
+    await run(
+      "INSERT INTO message_reactions (id, message_id, user_id, type) VALUES ($1,$2,$3,$4) ON CONFLICT(message_id,user_id) DO UPDATE SET type=excluded.type",
+      [uuidv4(), req.params.id, userId, type]
+    );
+    res.json({ success: true, reaction: type });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/v1/messages/:id", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    const m = await query("SELECT * FROM messages WHERE id=$1 AND sender_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND_OR_NOT_OWNER" });
+    await run("UPDATE messages SET deleted_at=CURRENT_TIMESTAMP, body=NULL WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MUTES TABLE AUTO-CREATE ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    await run("CREATE TABLE IF NOT EXISTS mutes (id TEXT PRIMARY KEY, muter_id TEXT NOT NULL, muted_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(muter_id, muted_id))");
+    await run("CREATE INDEX IF NOT EXISTS idx_mutes_muter ON mutes(muter_id)");
+    console.log("[PATCH-B] mutes table ready");
+  } catch (e) {
+    console.error("[PATCH-B] mutes table:", e.message);
+  }
+})();
+
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
