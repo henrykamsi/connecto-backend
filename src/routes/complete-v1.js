@@ -540,7 +540,7 @@ router.post('/social/follow/:userId',auth,async(req,res,next)=>{
     );
 
     await notify({
-      userId:req.params.userId,
+      userId: req.params.userId,
       actorId:req.user.id,
       type:'USER_FOLLOWED',
       title:'New follower',
@@ -572,13 +572,13 @@ router.delete('/social/follow/:userId',auth,async(req,res,next)=>{
 router.post('/social/friend-request/:userId',auth,async(req,res,next)=>{
   try {
     await query(
-      `INSERT INTO friend_requests(sender_id,receiver_id)
+      `INSERT OR IGNORE INTO friend_requests (sender_id, receiver_id)
        VALUES($1,$2)`,
       [req.user.id,req.params.userId]
     );
 
     await notify({
-      userId:req.params.userId,
+      userId: req.params.userId,
       actorId:req.user.id,
       type:'FRIEND_REQUESTED',
       title:'Friend request',
@@ -815,8 +815,7 @@ router.post('/chat/conversations',auth,async(req,res,next)=>{
     const id = conversation.rows[0].id;
 
     await query(
-      `INSERT INTO conversation_members(conversation_id,user_id)
-       VALUES($1,$2),($1,$3)`,
+      `INSERT INTO conversation_members (conversation_id, user_id) VALUES ($1, $2), ($1, $3)`,
       [id,req.user.id,otherUserId]
     );
 

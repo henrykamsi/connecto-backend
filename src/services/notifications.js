@@ -13,7 +13,7 @@ async function notify({
 }) {
   const result = await query(
     `INSERT INTO notifications
-     (user_id,actor_id,type,title,body,target_type,target_id,data)
+     (recipient_id,actor_id,type,title,body,target_type,target_id,data)
      VALUES($1,$2,$3,$4,$5,$6,$7,$8)
      RETURNING *`,
     [
