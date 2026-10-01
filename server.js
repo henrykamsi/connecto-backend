@@ -2896,6 +2896,464 @@ app.post("/api/v1/admin/organizations/seed", async (req, res) => {
   }
 });
 
+/* ============================================================
+   PATCH G — MESSAGE REQUESTS, ACTIVE USERS, DELIVERED/RECEIVED
+   Uses helpers already in server.js
+   ==========================================================*/
+
+/* ---------- SCHEMA SAFETY ---------- */
+
+(async () => {
+  try {
+    const { run } = require("./src/db");
+
+    await run("CREATE TABLE IF NOT EXISTS message_requests_v2 (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, sender_id TEXT NOT NULL, receiver_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(conversation_id, sender_id, receiver_id))");
+    await run("CREATE INDEX IF NOT EXISTS idx_msg_req_receiver ON message_requests_v2(receiver_id, status)");
+    await run("CREATE INDEX IF NOT EXISTS idx_msg_req_sender ON message_requests_v2(sender_id, status)");
+
+    try { await run("ALTER TABLE messages ADD COLUMN delivered_at TEXT"); } catch (e) {}
+    try { await run("ALTER TABLE messages ADD COLUMN received_at TEXT"); } catch (e) {}
+    try { await run("ALTER TABLE messages ADD COLUMN read_at TEXT"); } catch (e) {}
+
+    console.log("[PATCH-G] schema ready");
+  } catch (e) {
+    console.error("[PATCH-G] schema:", e.message);
+  }
+})();
+
+/* ---------- HELPERS ---------- */
+
+async function areFriends(userA, userB) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT 1 FROM friendships WHERE (user_a_id=$1 AND user_b_id=$2) OR (user_a_id=$2 AND user_b_id=$1) LIMIT 1",
+      [userA, userB]
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function isFollowing(followerId, followingId) {
+  try {
+    const { query } = require("./src/db");
+    const r = await query(
+      "SELECT 1 FROM follows WHERE follower_id=$1 AND following_id=$2 LIMIT 1",
+      [followerId, followingId]
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function sendNotificationSafe(payload) {
+  try {
+    const mod = require("./src/services/notifications");
+    if (mod && typeof mod.notify === "function") {
+      await mod.notify(payload);
+    }
+  } catch (e) {
+    /* notifications are best effort */
+  }
+}
+
+/* ---------- CREATE CONVERSATION (STRANGER DETECTION) ---------- */
+
+app.post("/api/v1/chat/conversations/v2", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const otherUserId = String(req.body.userId || "").trim();
+    if (!otherUserId || otherUserId === userId) {
+      return res.status(400).json({ success: false, error: "INVALID_USER" });
+    }
+
+    const existing = await query(
+      "SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1",
+      [userId, otherUserId]
+    );
+
+    if (existing.rows.length) {
+      const convId = existing.rows[0].id;
+      const reqRow = await query(
+        "SELECT status FROM message_requests_v2 WHERE conversation_id=$1 AND receiver_id=$2 LIMIT 1",
+        [convId, otherUserId]
+      );
+      const requestStatus = reqRow.rows.length ? reqRow.rows[0].status : "accepted";
+      return res.json({ success: true, conversationId: convId, requestStatus: requestStatus });
+    }
+
+    const convId = uuidv4();
+    await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [convId, userId]);
+    await run(
+      "INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)",
+      [uuidv4(), convId, userId, uuidv4(), otherUserId]
+    );
+
+    const friends = await areFriends(userId, otherUserId);
+    const following = await isFollowing(userId, otherUserId);
+    const needsRequest = !friends && !following;
+
+    if (needsRequest) {
+      await run(
+        "INSERT INTO message_requests_v2 (id, conversation_id, sender_id, receiver_id, status) VALUES ($1,$2,$3,$4,'pending')",
+        [uuidv4(), convId, userId, otherUserId]
+      );
+
+      await sendNotificationSafe({
+        userId: otherUserId,
+        actorId: userId,
+        type: "MESSAGE_REQUEST",
+        title: "New message request",
+        body: "Someone wants to send you a message",
+        targetType: "conversation",
+        targetId: convId
+      });
+
+      return res.status(201).json({
+        success: true,
+        conversationId: convId,
+        requestStatus: "pending"
+      });
+    }
+
+    await run(
+      "INSERT INTO message_requests_v2 (id, conversation_id, sender_id, receiver_id, status) VALUES ($1,$2,$3,$4,'accepted')",
+      [uuidv4(), convId, userId, otherUserId]
+    );
+
+    res.status(201).json({
+      success: true,
+      conversationId: convId,
+      requestStatus: "accepted"
+    });
+  } catch (err) {
+    console.error("[CONV-V2]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- LIST PENDING REQUESTS ---------- */
+
+app.get("/api/v1/messages/requests", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT mr.id, mr.conversation_id, mr.status, mr.created_at, u.id AS sender_id, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM message_requests_v2 mr JOIN users u ON u.id = mr.sender_id WHERE mr.receiver_id=$1 AND mr.status='pending' ORDER BY mr.created_at DESC",
+      [userId]
+    );
+
+    res.json({ success: true, requests: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ACCEPT REQUEST ---------- */
+
+app.post("/api/v1/messages/requests/:id/accept", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const reqRow = await query(
+      "SELECT * FROM message_requests_v2 WHERE id=$1 AND receiver_id=$2 LIMIT 1",
+      [req.params.id, userId]
+    );
+    if (!reqRow.rows.length) return res.status(404).json({ success: false, error: "REQUEST_NOT_FOUND" });
+
+    await run(
+      "UPDATE message_requests_v2 SET status='accepted', updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [req.params.id]
+    );
+
+    const senderId = reqRow.rows[0].sender_id;
+
+    await sendNotificationSafe({
+      userId: senderId,
+      actorId: userId,
+      type: "MESSAGE_REQUEST_ACCEPTED",
+      title: "Message request accepted",
+      body: "Your message request was accepted",
+      targetType: "conversation",
+      targetId: reqRow.rows[0].conversation_id
+    });
+
+    res.json({ success: true, accepted: true });
+  } catch (err) {
+    console.error("[ACCEPT-REQ]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DECLINE REQUEST ---------- */
+
+app.post("/api/v1/messages/requests/:id/decline", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const reqRow = await query(
+      "SELECT * FROM message_requests_v2 WHERE id=$1 AND receiver_id=$2 LIMIT 1",
+      [req.params.id, userId]
+    );
+    if (!reqRow.rows.length) return res.status(404).json({ success: false, error: "REQUEST_NOT_FOUND" });
+
+    await run(
+      "UPDATE message_requests_v2 SET status='declined', updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+      [req.params.id]
+    );
+
+    res.json({ success: true, declined: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- CHECK REQUEST STATE FOR A CONVERSATION ---------- */
+
+app.get("/api/v1/chat/conversations/:id/request-state", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT mr.id, mr.status, mr.sender_id, mr.receiver_id, mr.created_at FROM message_requests_v2 mr JOIN conversation_members cm ON cm.conversation_id = mr.conversation_id WHERE mr.conversation_id=$1 AND cm.user_id=$2 LIMIT 1",
+      [req.params.id, userId]
+    );
+
+    if (!r.rows.length) {
+      return res.json({ success: true, request: null, canMessage: true });
+    }
+
+    const row = r.rows[0];
+    const canMessage = row.status === "accepted" || row.sender_id === userId;
+
+    res.json({
+      success: true,
+      request: row,
+      canMessage: canMessage,
+      isReceiver: row.receiver_id === userId
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- ACTIVE USERS ---------- */
+
+app.get("/api/v1/users/active", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 30), 60);
+
+    const r = await query(
+      "SELECT u.id, u.username, u.first_name, u.surname, u.profile_photo_media_id, MAX(s.last_seen_at) AS last_seen FROM users u LEFT JOIN sessions s ON s.user_id = u.id AND s.revoked_at IS NULL WHERE u.id <> $1 AND u.account_status='active' AND u.deleted_at IS NULL GROUP BY u.id ORDER BY last_seen DESC NULLS LAST LIMIT $2",
+      [userId, limit]
+    );
+
+    const now = Date.now();
+    const users = r.rows.map(function (row) {
+      let state = "offline";
+      if (row.last_seen) {
+        const diff = now - new Date(row.last_seen).getTime();
+        if (diff < 60 * 1000) state = "online";
+        else if (diff < 30 * 60 * 1000) state = "recent";
+      }
+      return {
+        id: row.id,
+        username: row.username,
+        first_name: row.first_name,
+        surname: row.surname,
+        profile_photo_media_id: row.profile_photo_media_id,
+        last_seen: row.last_seen,
+        presence: state
+      };
+    });
+
+    res.json({ success: true, users: users });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- DELIVERED (SINGLE GREY CHECK) ---------- */
+
+app.post("/api/v1/messages/:id/delivered", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM messages WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [m.rows[0].conversation_id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    await run("UPDATE messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP), received_at=COALESCE(received_at,CURRENT_TIMESTAMP) WHERE id=$1", [req.params.id]);
+
+    res.json({ success: true, delivered: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MESSAGE READ (DOUBLE BLUE CHECK) ---------- */
+
+app.post("/api/v1/messages/:id/read-v2", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM messages WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [m.rows[0].conversation_id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    await run(
+      "UPDATE messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP), received_at=COALESCE(received_at,CURRENT_TIMESTAMP), read_at=COALESCE(read_at,CURRENT_TIMESTAMP), seen_at=COALESCE(seen_at,CURRENT_TIMESTAMP) WHERE id=$1",
+      [req.params.id]
+    );
+
+    res.json({ success: true, read: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- CONVERSATIONS WITH PRESENCE ---------- */
+
+app.get("/api/v1/chat/conversations/v2", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT c.id, c.type, c.created_at, c.updated_at, u.id AS other_user_id, u.username AS other_username, u.first_name AS other_first_name, u.surname AS other_surname, u.profile_photo_media_id AS other_photo, (SELECT body FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message, (SELECT sent_at FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message_at, (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL) AS other_last_seen FROM conversations c JOIN conversation_members me ON me.conversation_id=c.id AND me.user_id=$1 JOIN conversation_members other ON other.conversation_id=c.id AND other.user_id<>$1 JOIN users u ON u.id=other.user_id LEFT JOIN message_requests_v2 mr ON mr.conversation_id=c.id AND mr.receiver_id=$1 WHERE (mr.status IS NULL OR mr.status='accepted' OR mr.sender_id=$1) ORDER BY COALESCE((SELECT sent_at FROM messages WHERE conversation_id=c.id ORDER BY sent_at DESC LIMIT 1), c.created_at) DESC",
+      [userId]
+    );
+
+    const now = Date.now();
+    const conversations = r.rows.map(function (row) {
+      let presence = "offline";
+      if (row.other_last_seen) {
+        const diff = now - new Date(row.other_last_seen).getTime();
+        if (diff < 60 * 1000) presence = "online";
+        else if (diff < 30 * 60 * 1000) presence = "recent";
+      }
+      return {
+        id: row.id,
+        type: row.type,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        other_user_id: row.other_user_id,
+        other_username: row.other_username,
+        other_first_name: row.other_first_name,
+        other_surname: row.other_surname,
+        other_photo: row.other_photo,
+        last_message: row.last_message,
+        last_message_at: row.last_message_at,
+        other_presence: presence
+      };
+    });
+
+    res.json({ success: true, conversations: conversations });
+  } catch (err) {
+    console.error("[CONV-V2-LIST]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ---------- MESSAGES WITH STATUS FLAGS ---------- */
+
+app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [req.params.id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    const r = await query(
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.delivered_at, m.received_at, m.read_at, m.seen_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
+      [req.params.id]
+    );
+
+    res.json({ success: true, messages: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
