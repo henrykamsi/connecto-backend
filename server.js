@@ -903,6 +903,45 @@ app.get("/api/v1/users/by-username/:username", async (req, res) => {
   }
 });
 
+app.get("/api/v1/users/search", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    }
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const q = String(req.query.q || "").trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+
+    let rows;
+    if (!q) {
+      const r = await query(
+        "SELECT id, first_name, surname, username, bio, category, country, profile_photo_media_id FROM users WHERE account_status=\x27active\x27 AND deleted_at IS NULL AND id<>$1 ORDER BY created_at DESC LIMIT $2",
+        [userId, limit]
+      );
+      rows = r.rows;
+    } else {
+      const like = "%" + q.toLowerCase() + "%";
+      const r = await query(
+        "SELECT id, first_name, surname, username, bio, category, country, profile_photo_media_id FROM users WHERE account_status=\x27active\x27 AND deleted_at IS NULL AND id<>$1 AND (lower(username) LIKE $2 OR lower(first_name) LIKE $2 OR lower(surname) LIKE $2) ORDER BY created_at DESC LIMIT $3",
+        [userId, like, limit]
+      );
+      rows = r.rows;
+    }
+
+    res.json({ success: true, users: rows });
+  } catch (err) {
+    console.error("[USERS-SEARCH]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/v1/users/:id/relationship", async (req, res) => {
   try {
     const { query } = require("./src/db");
