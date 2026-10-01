@@ -942,6 +942,32 @@ app.get("/api/v1/users/search", async (req, res) => {
   }
 });
 
+app.get("/api/v1/posts/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    }
+    try { jwt.verify(authHeader.slice(7), envLocal.jwt.secret); }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      [req.params.id]
+    );
+    if (!r.rows.length) {
+      return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+    }
+    res.json({ success: true, post: r.rows[0] });
+  } catch (err) {
+    console.error("[POST-DETAIL]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/v1/users/:id/relationship", async (req, res) => {
   try {
     const { query } = require("./src/db");
