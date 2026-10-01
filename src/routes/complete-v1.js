@@ -672,7 +672,7 @@ router.get('/feed',auth,async(req,res,next)=>{
 
     const result = await query(
       `SELECT
-         p.*,
+         p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
          u.first_name,u.surname,u.username,u.profile_photo_media_id,
          COALESCE(rc.reaction_count,0) reaction_count,
          COALESCE(cc.comment_count,0) comment_count
