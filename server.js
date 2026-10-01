@@ -3179,7 +3179,7 @@ app.get("/api/v1/chat/conversations/:id/request-state", async (req, res) => {
 
 /* ---------- ACTIVE USERS ---------- */
 
-app.get("/api/v1/users/active", async (req, res) => {
+app.get("/api/v1/users/active-users", async (req, res) => {
   try {
     const { query } = require("./src/db");
     const jwt = require("jsonwebtoken");
