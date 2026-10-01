@@ -809,7 +809,7 @@ router.post('/chat/conversations',auth,async(req,res,next)=>{
     const conversation = await query(
       `INSERT INTO conversations(type,created_by)
        VALUES('direct',$1) RETURNING id`,
-      []
+      [req.user.id]
     );
 
     const id = conversation.rows[0].id;
