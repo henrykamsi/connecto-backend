@@ -676,6 +676,7 @@ router.get('/feed',auth,async(req,res,next)=>{
          p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
          u.first_name,u.surname,u.username,u.profile_photo_media_id,
          COALESCE(rc.reaction_count,0) reaction_count,
+         (SELECT 1 FROM reactions r2 WHERE r2.post_id=p.id AND r2.user_id=$1 LIMIT 1) AS viewer_reacted_int,
          (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) IS NOT NULL AS viewer_has_reacted,
          COALESCE(cc.comment_count,0) comment_count
        FROM posts p
@@ -704,9 +705,15 @@ router.get('/feed',auth,async(req,res,next)=>{
       [req.user.id,limit,offset]
     );
 
+    const posts = result.rows.map(r => ({
+      ...r,
+      viewer_has_reacted: Number(r.viewer_reacted_int) === 1,
+      viewer_reacted_int: undefined
+    }));
+
     res.json({
       success:true,
-      posts:result.rows,
+      posts,
       pagination:{limit,offset}
     });
   } catch(err) {
