@@ -46,12 +46,12 @@ function normalizeSql(sql) {
 async function query(sql, params = []) {
   const normalized = normalizeSql(sql).trim();
 
-  const upper = normalized.toUpperCase();
+  const trimmedUpper = normalized.replace(/^\\s+/, "").toUpperCase();
 
   const returnsRows =
-    upper.startsWith("SELECT") ||
-    upper.startsWith("WITH") ||
-    upper.startsWith("PRAGMA") ||
+    trimmedUpper.startsWith("SELECT") ||
+    trimmedUpper.startsWith("WITH") ||
+    trimmedUpper.startsWith("PRAGMA") ||
     /\bRETURNING\b/i.test(normalized);
 
   if (returnsRows) {
