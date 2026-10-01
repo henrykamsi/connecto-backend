@@ -644,8 +644,8 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
 router.post('/posts',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `INSERT INTO posts(author_id,text,audience,comments_enabled,share_enabled)
-       VALUES($1,$2,$3,$4,$5)
+      `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled)
+       VALUES($1,$2,$3,$4,$5,$6)
        RETURNING *`,
       [
         req.user.id,
