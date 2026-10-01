@@ -151,7 +151,8 @@ router.post('/auth/register',async(req,res,next)=>{
     if (exists.rows.length) {
       return res.status(409).json({
         success:false,
-        error:'An account with those credentials already exists'
+        error:'EMAIL_ALREADY_EXISTS',
+        message:'An account with this email already exists. Please log in instead.'
       });
     }
 
