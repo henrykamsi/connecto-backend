@@ -1008,7 +1008,7 @@ app.get("/api/v1/users/:id/posts", async (req, res) => {
     const limit = Math.min(Number(req.query.limit || 20), 50);
     const offset = Math.max(Number(req.query.offset || 0), 0);
     const r = await query(
-      "SELECT p.*, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.author_id=$1 AND p.deleted_at IS NULL AND p.audience='public' ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.author_id=$1 AND p.deleted_at IS NULL AND p.audience='public' ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
       [req.params.id, limit, offset]
     );
     res.json({ success: true, posts: r.rows, pagination: { limit, offset } });
