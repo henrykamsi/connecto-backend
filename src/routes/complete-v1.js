@@ -694,7 +694,7 @@ router.get('/feed',auth,async(req,res,next)=>{
            OR p.author_id=$1
            OR EXISTS(
              SELECT 1 FROM friendships f
-             WHERE f.user_id=$1 AND f.friend_id=p.author_id
+             WHERE (f.user_a_id=$1 AND f.user_b_id=p.author_id) OR (f.user_b_id=$1 AND f.user_a_id=p.author_id)
            )
          )
        ORDER BY p.created_at DESC
