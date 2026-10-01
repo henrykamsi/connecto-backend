@@ -942,6 +942,33 @@ app.get("/api/v1/users/search", async (req, res) => {
   }
 });
 
+app.get("/api/v1/posts/:id/comments", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    }
+    try { jwt.verify(authHeader.slice(7), envLocal.jwt.secret); }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+
+    const r = await query(
+      "SELECT c.id, c.post_id, c.author_id, c.parent_comment_id, c.body, c.created_at, c.updated_at, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM comments c JOIN users u ON u.id = c.author_id WHERE c.post_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT $2 OFFSET $3",
+      [req.params.id, limit, offset]
+    );
+
+    res.json({ success: true, comments: r.rows });
+  } catch (err) {
+    console.error("[COMMENTS-GET]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/v1/posts/:id", async (req, res) => {
   try {
     const { query } = require("./src/db");

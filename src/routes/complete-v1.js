@@ -755,10 +755,11 @@ router.post('/posts/:postId/comments',auth,async(req,res,next)=>{
     }
 
     const result = await query(
-      `INSERT INTO comments(post_id,author_id,parent_comment_id,body)
-       VALUES($1,$2,$3,$4)
+      `INSERT INTO comments(id,post_id,author_id,parent_comment_id,body)
+       VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
+        uuidv4(),
         req.params.postId,
         req.user.id,
         req.body.parentId || null,
@@ -976,7 +977,7 @@ router.post('/calls',auth,async(req,res,next)=>{
     const result = await query(
       `INSERT INTO calls
        (conversation_id,caller_id,receiver_id,type)
-       VALUES($1,$2,$3,$4)
+       VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
         req.body.conversationId || null,
@@ -1095,7 +1096,7 @@ router.post('/calls/:id/signal',auth,async(req,res,next)=>{
     const result = await query(
       `INSERT INTO call_signals
        (call_id,sender_id,signal_type,payload)
-       VALUES($1,$2,$3,$4)
+       VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
         req.params.id,
