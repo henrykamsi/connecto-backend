@@ -648,6 +648,7 @@ router.post('/posts',auth,async(req,res,next)=>{
        VALUES($1,$2,$3,$4,$5,$6)
        RETURNING *`,
       [
+        uuidv4(),
         req.user.id,
         req.body.body || null,
         req.body.visibility || 'public',
