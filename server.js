@@ -903,6 +903,52 @@ app.get("/api/v1/users/by-username/:username", async (req, res) => {
   }
 });
 
+app.get("/api/v1/users/:id/relationship", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    }
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const targetId = req.params.id;
+    if (targetId === userId) {
+      return res.json({ success: true, isSelf: true, isFollowing: false, isFriend: false, friendRequestSent: false });
+    }
+
+    const follow = await query(
+      "SELECT 1 FROM follows WHERE follower_id=$1 AND following_id=$2 LIMIT 1",
+      [userId, targetId]
+    );
+
+    const friend = await query(
+      "SELECT 1 FROM friendships WHERE (user_a_id=$1 AND user_b_id=$2) OR (user_a_id=$2 AND user_b_id=$1) LIMIT 1",
+      [userId, targetId]
+    );
+
+    const fr = await query(
+      "SELECT status FROM friend_requests WHERE sender_id=$1 AND receiver_id=$2 LIMIT 1",
+      [userId, targetId]
+    );
+
+    res.json({
+      success: true,
+      isSelf: false,
+      isFollowing: follow.rows.length > 0,
+      isFriend: friend.rows.length > 0,
+      friendRequestSent: fr.rows.length > 0 && fr.rows[0].status === "pending"
+    });
+  } catch (err) {
+    console.error("[RELATIONSHIP]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get("/api/v1/users/:id", async (req, res) => {
   try {
     const { query } = require("./src/db");
