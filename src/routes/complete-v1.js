@@ -1357,6 +1357,49 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
 /* CALLS / WEBRTC SIGNALING */
 
+router.get('/calls/ice-servers',auth,async(req,res,next)=>{
+  try {
+    const list = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+
+    try {
+      const crypto = require('crypto');
+      const r = await query(
+        "SELECT * FROM provider_credentials WHERE category='turn' AND is_active=1 ORDER BY is_primary DESC, priority ASC LIMIT 1"
+      );
+      if (r.rows.length) {
+        const row = r.rows[0];
+        const KEY = process.env.CONTROL_ENCRYPTION_KEY;
+        if (KEY) {
+          const raw = Buffer.from(row.credentials_enc, 'base64');
+          const iv = raw.subarray(0, 12);
+          const tag = raw.subarray(12, 28);
+          const data = raw.subarray(28);
+          const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(KEY, 'hex'), iv);
+          decipher.setAuthTag(tag);
+          const cred = JSON.parse(Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8'));
+
+          if (cred.url && cred.username && cred.password) {
+            list.push({
+              urls: cred.url,
+              username: cred.username,
+              credential: cred.password
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[ICE-SERVERS] panel read failed:', e.message);
+    }
+
+    res.json({ success: true, iceServers: list });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/calls',auth,async(req,res,next)=>{
   try {
     if (!req.body.receiverId) {
