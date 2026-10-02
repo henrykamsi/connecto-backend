@@ -115,11 +115,11 @@ async function attachMentions(rows) {
   if (!list.length) {
     return rows.map(r => ({ ...r, mentions: [] }));
   }
-  const placeholders = list.map((_, i) => `$${i + 1}`).join(",");
+  const placeholders = list.map((_, i) => `${i + 1}`).join(",");
   let found = { rows: [] };
   try {
     found = await query(
-      `SELECT id, username FROM users WHERE lower(username) IN (${placeholders})`,
+      `SELECT id, username, first_name, surname, profile_photo_media_id FROM users WHERE lower(username) IN (${placeholders})`,
       list
     );
   } catch (e) {
@@ -127,13 +127,22 @@ async function attachMentions(rows) {
   }
   const map = {};
   for (const u of found.rows) {
-    map[String(u.username).toLowerCase()] = u.id;
+    map[String(u.username).toLowerCase()] = u;
   }
   return rows.map(r => {
     const names = extractMentionUsernames(r.text);
     const mentions = [];
     for (const n of names) {
-      if (map[n]) mentions.push({ username: n, user_id: map[n] });
+      const u = map[n];
+      if (u) {
+        mentions.push({
+          username: n,
+          user_id: u.id,
+          first_name: u.first_name || null,
+          surname: u.surname || null,
+          profile_photo_media_id: u.profile_photo_media_id || null
+        });
+      }
     }
     return { ...r, mentions };
   });
@@ -734,6 +743,57 @@ router.post('/posts',auth,async(req,res,next)=>{
   }
 });
 
+router.get('/users/:id/posts',auth,async(req,res,next)=>{
+  try {
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const type = String(req.query.type || '').toLowerCase();
+
+    let extra = '';
+    if (type === 'image') {
+      extra = " AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='image' AND m.deleted_at IS NULL)";
+    } else if (type === 'comic') {
+      extra = " AND NOT EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL)";
+    }
+
+    const r = await query(
+      `SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
+              u.first_name, u.surname, u.username, u.profile_photo_media_id,
+              COALESCE(p.view_count, 0) AS view_count,
+              (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key,
+              (SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type
+       FROM posts p
+       JOIN users u ON u.id = p.author_id
+       WHERE p.author_id=$1 AND p.deleted_at IS NULL
+         AND p.audience='public'
+         ${extra}
+       ORDER BY p.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [req.params.id, limit, offset]
+    );
+
+    const posts = await Promise.all(r.rows.map(async row => {
+      let mediaUrl = null;
+      if (row.media_key) {
+        try {
+          if (String(row.media_key).indexOf("http") === 0) {
+            mediaUrl = row.media_key;
+          } else {
+            mediaUrl = await b2.signedDownload(row.media_key, 3600);
+          }
+        } catch (e) {
+          console.error("[USER-POSTS-MEDIA]", e.message);
+        }
+      }
+      return { ...row, media_url: mediaUrl, media_key: undefined };
+    }));
+
+    res.json({ success: true, posts, pagination: { limit, offset } });
+  } catch(err) {
+    next(err);
+  }
+});
+
 router.get('/feed',auth,async(req,res,next)=>{
   try {
     const limit = Math.min(Number(req.query.limit || 20),50);
@@ -848,6 +908,18 @@ router.delete('/posts/:postId/reactions',auth,async(req,res,next)=>{
     );
 
     res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/posts/:id/view',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `UPDATE posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id=$1`,
+      [req.params.id]
+    );
+    res.json({ success: true });
   } catch(err) {
     next(err);
   }

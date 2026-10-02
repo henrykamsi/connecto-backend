@@ -1,0 +1,500 @@
+
+    const result = await query(
+      `INSERT INTO calls
+       (conversation_id,caller_id,receiver_id,type)
+       VALUES($1,$2,$3,$4,$5)
+       RETURNING *`,
+      [
+        req.body.conversationId || null,
+        req.user.id,
+        req.body.receiverId,
+        req.body.type || 'video'
+      ]
+    );
+
+    await notify({
+      userId:req.body.receiverId,
+      actorId:req.user.id,
+      type:'CALL_RECEIVED',
+      title:'Incoming call',
+      body:`${req.user.first_name} is calling you`,
+      targetType:'call',
+      targetId:result.rows[0].id
+    });
+
+    res.status(201).json({
+      success:true,
+      call:result.rows[0]
+    });
+
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.get('/calls/:id',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `SELECT * FROM calls
+       WHERE id=$1
+       AND (caller_id=$2 OR receiver_id=$2)`,
+      [req.params.id,req.user.id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success:false,
+        error:'Call not found'
+      });
+    }
+
+    res.json({
+      success:true,
+      call:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/calls/:id/accept',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `UPDATE calls
+       SET status='accepted',accepted_at=CURRENT_TIMESTAMP
+       WHERE id=$1 AND receiver_id=$2
+       RETURNING *`,
+      [req.params.id,req.user.id]
+    );
+
+    res.json({
+      success:true,
+      call:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/calls/:id/reject',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `UPDATE calls
+       SET status='rejected',ended_at=CURRENT_TIMESTAMP
+       WHERE id=$1
+       AND (receiver_id=$2 OR caller_id=$2)
+       RETURNING *`,
+      [req.params.id,req.user.id]
+    );
+
+    res.json({
+      success:true,
+      call:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/calls/:id/end',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `UPDATE calls
+       SET status='ended',ended_at=CURRENT_TIMESTAMP
+       WHERE id=$1
+       AND (receiver_id=$2 OR caller_id=$2)
+       RETURNING *`,
+      [req.params.id,req.user.id]
+    );
+
+    res.json({
+      success:true,
+      call:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/calls/:id/signal',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `INSERT INTO call_signals
+       (call_id,sender_id,signal_type,payload)
+       VALUES($1,$2,$3,$4,$5)
+       RETURNING *`,
+      [
+        req.params.id,
+        req.user.id,
+        req.body.signalType,
+        req.body.payload || {}
+      ]
+    );
+
+    res.status(201).json({
+      success:true,
+      signal:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* BLOCKING / REPORTING */
+
+router.post('/blocks/:userId',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `INSERT INTO blocks(blocker_id,blocked_id)
+       VALUES($1,$2)
+       ON CONFLICT DO NOTHING`,
+      [req.user.id,req.params.userId]
+    );
+
+    await query(
+      `DELETE FROM follows
+       WHERE (follower_id=$1 AND following_id=$2)
+          OR (follower_id=$2 AND following_id=$1)`,
+      [req.user.id,req.params.userId]
+    );
+
+    await query(
+      `DELETE FROM friendships
+       WHERE (user_a_id=$1 AND user_b_id=$2)
+          OR (user_a_id=$2 AND user_b_id=$1)`,
+      [req.user.id,req.params.userId]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.delete('/blocks/:userId',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `DELETE FROM blocks
+       WHERE blocker_id=$1 AND blocked_id=$2`,
+      [req.user.id,req.params.userId]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/reports',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `INSERT INTO reports
+       (reporter_id,reported_user_id,post_id,message_id,category,description)
+       VALUES($1,$2,$3,$4,$5,$6)
+       RETURNING id,status,created_at`,
+      [
+        req.user.id,
+        req.body.reportedUserId || null,
+        req.body.postId || null,
+        req.body.messageId || null,
+        req.body.category,
+        req.body.description || null
+      ]
+    );
+
+    res.status(201).json({
+      success:true,
+      report:result.rows[0]
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* DEVICES / PUSH */
+
+router.post('/devices',auth,async(req,res,next)=>{
+  try {
+    if (!req.body.fcmToken) {
+      return res.status(400).json({
+        success:false,
+        error:'fcmToken required'
+      });
+    }
+
+    await query(
+      `INSERT INTO device_tokens
+       (user_id,token,device_type,device_model,os_version,app_version)
+       VALUES($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT(user_id,token)
+       DO UPDATE SET
+         active=true,
+         updated_at=CURRENT_TIMESTAMP`,
+      [
+        req.user.id,
+        req.body.fcmToken,
+        req.body.deviceType || 'android',
+        req.body.deviceName || null,
+        req.body.osVersion || null,
+        req.body.appVersion || null
+      ]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.delete('/devices/:token',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `UPDATE device_tokens
+       SET active=false,updated_at=CURRENT_TIMESTAMP
+       WHERE recipient_id=$1 AND token=$2`,
+      [req.user.id,req.params.token]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* NOTIFICATIONS */
+
+router.get('/notifications',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `SELECT * FROM notifications
+       WHERE recipient_id=$1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [req.user.id]
+    );
+
+    res.json({
+      success:true,
+      notifications:result.rows
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/notifications/read-all',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `UPDATE notifications
+       SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP)
+       WHERE recipient_id=$1`,
+      [req.user.id]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* API KEYS */
+
+router.post('/developer/api-keys',auth,async(req,res,next)=>{
+  try {
+    const secret = `cx_${randomSecret(32)}`;
+    const prefix = secret.slice(0,11);
+
+    const result = await query(
+      `INSERT INTO api_keys
+       (user_id,name,key_prefix,secret_hash)
+       VALUES($1,$2,$3,$4)
+       RETURNING id,name,key_prefix,created_at`,
+      [
+        req.user.id,
+        req.body.name || 'Connecto API Key',
+        prefix,
+        hashSecret(secret)
+      ]
+    );
+
+    res.status(201).json({
+      success:true,
+      apiKey:result.rows[0],
+      secret,
+      warning:'Store this secret securely. It will not be shown again.'
+    });
+
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.get('/developer/api-keys',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `SELECT id,name,key_prefix,last_used_at,created_at,revoked_at
+       FROM api_keys
+       WHERE recipient_id=$1
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+
+    res.json({
+      success:true,
+      apiKeys:result.rows
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.post('/developer/api-keys/:id/revoke',auth,async(req,res,next)=>{
+  try {
+    await query(
+      `UPDATE api_keys
+       SET revoked_at=CURRENT_TIMESTAMP
+       WHERE id=$1 AND user_id=$2`,
+      [req.params.id,req.user.id]
+    );
+
+    res.json({success:true});
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* SETTINGS */
+
+router.get('/settings',auth,async(req,res,next)=>{
+  try {
+    const result = await query(
+      `SELECT * FROM user_settings WHERE recipient_id=$1`,
+      [req.user.id]
+    );
+
+    res.json({
+      success:true,
+      settings:result.rows[0] || null
+    });
+  } catch(err) {
+    next(err);
+  }
+});
+
+router.patch('/settings',auth,async(req,res,next)=>{
+  try {
+    const fields = [
+      'profile_visibility',
+      'friend_visibility',
+      'follower_visibility',
+      'message_privacy',
+      'typing_enabled',
+      'disappearing_messages',
+      'two_factor_enabled',
+      'biometric_enabled'
+    ];
+
+    const assignments=[];
+    const values=[];
+    let n=1;
+
+    for (const field of fields) {
+      if (req.body[field] !== undefined) {
+        assignments.push(`${field}=$${n++}`);
+        values.push(req.body[field]);
+      }
+    }
+
+    if (!assignments.length) {
+      return res.status(400).json({
+        success:false,
+        error:'No settings supplied'
+      });
+    }
+
+    values.push(req.user.id);
+
+    await query(
+      `INSERT INTO user_settings(user_id)
+       VALUES($${n})
+       ON CONFLICT DO NOTHING`,
+      [req.user.id]
+    );
+
+    const result = await query(
+      `UPDATE user_settings
+       SET ${assignments.join(',')},updated_at=CURRENT_TIMESTAMP
+       WHERE user_id=$${n}
+       RETURNING *`,
+      values
+    );
+
+    res.json({
+      success:true,
+      settings:result.rows[0]
+    });
+
+  } catch(err) {
+    next(err);
+  }
+});
+
+/* PASSWORD */
+
+router.post('/auth/change-password',auth,async(req,res,next)=>{
+  try {
+    if (!req.body.currentPassword || !req.body.newPassword) {
+      return res.status(400).json({
+        success:false,
+        error:'Current and new password are required'
+      });
+    }
+
+    const result = await query(
+      `SELECT password_hash FROM users WHERE id=$1`,
+      [req.user.id]
+    );
+
+    const valid = await bcrypt.compare(
+      req.body.currentPassword,
+      result.rows[0].password_hash
+    );
+
+    if (!valid) {
+      return res.status(401).json({
+        success:false,
+        error:'Current password is incorrect'
+      });
+    }
+
+    if (String(req.body.newPassword).length < 8) {
+      return res.status(400).json({
+        success:false,
+        error:'New password must contain at least 8 characters'
+      });
+    }
+
+    const hash = await bcrypt.hash(req.body.newPassword,12);
+
+    await query(
+      `UPDATE users SET password_hash=$1,updated_at=CURRENT_TIMESTAMP
+       WHERE id=$2`,
+      [hash,req.user.id]
+    );
+
+    await query(
+      `UPDATE refresh_tokens
+       SET revoked_at=CURRENT_TIMESTAMP
+       WHERE recipient_id=$1 AND revoked_at IS NULL`,
+      [req.user.id]
+    );
+
+    await query(
+      `INSERT INTO security_events(user_id,event_type,metadata)
+       VALUES($1,'PASSWORD_CHANGED',$2)`,
+      [req.user.id,{time:new Date().toISOString()}]
+    );
+
+    res.json({
+      success:true,
+      message:'Password changed. Existing sessions were revoked.'
