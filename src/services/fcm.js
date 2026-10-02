@@ -1,6 +1,7 @@
-const admin = require('firebase-admin');
 const crypto = require('crypto');
 const env = require('../config/env');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 
 let ready = false;
 
@@ -55,9 +56,9 @@ async function initFCM() {
     return false;
   }
 
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.cert({
+  if (getApps().length === 0) {
+    initializeApp({
+      credential: cert({
         projectId: creds.projectId,
         clientEmail: creds.clientEmail,
         privateKey: creds.privateKey
@@ -79,7 +80,7 @@ async function sendToUser(userId, notification, data = {}) {
     const { query } = require('../db');
 
     const result = await query(
-      "SELECT fcm_token FROM device_tokens WHERE user_id=$1 AND active=1",
+      "SELECT token FROM device_tokens WHERE user_id=$1 AND active=1",
       [userId]
     );
 
@@ -87,9 +88,9 @@ async function sendToUser(userId, notification, data = {}) {
       return { sent: false, reason: "No active device tokens" };
     }
 
-    const tokens = result.rows.map(x => x.fcm_token);
+    const tokens = result.rows.map(x => x.token);
 
-    const response = await admin.messaging().sendEachForMulticast({
+    const response = await getMessaging().sendEachForMulticast({
       tokens,
       notification,
       data: Object.fromEntries(
