@@ -88,6 +88,57 @@ async function createSession(userId,req,body={}) {
   };
 }
 
+/* MENTION EXTRACTION HELPER */
+
+function extractMentionUsernames(text) {
+  if (!text) return [];
+  const matches = String(text).match(/@([a-zA-Z0-9_]{3,32})/g) || [];
+  const seen = {};
+  const out = [];
+  for (const m of matches) {
+    const u = m.slice(1).toLowerCase();
+    if (!seen[u]) {
+      seen[u] = true;
+      out.push(u);
+    }
+  }
+  return out;
+}
+
+async function attachMentions(rows) {
+  const all = {};
+  for (const row of rows) {
+    const names = extractMentionUsernames(row.text);
+    for (const n of names) all[n] = true;
+  }
+  const list = Object.keys(all);
+  if (!list.length) {
+    return rows.map(r => ({ ...r, mentions: [] }));
+  }
+  const placeholders = list.map((_, i) => `$${i + 1}`).join(",");
+  let found = { rows: [] };
+  try {
+    found = await query(
+      `SELECT id, username FROM users WHERE lower(username) IN (${placeholders})`,
+      list
+    );
+  } catch (e) {
+    console.error("[MENTIONS-LOOKUP]", e.message);
+  }
+  const map = {};
+  for (const u of found.rows) {
+    map[String(u.username).toLowerCase()] = u.id;
+  }
+  return rows.map(r => {
+    const names = extractMentionUsernames(r.text);
+    const mentions = [];
+    for (const n of names) {
+      if (map[n]) mentions.push({ username: n, user_id: map[n] });
+    }
+    return { ...r, mentions };
+  });
+}
+
 /* HEALTH */
 
 router.get('/health',(req,res)=>{
@@ -119,7 +170,7 @@ router.get('/providers/status',async(req,res)=>{
         env.fcm.clientEmail &&
         env.fcm.privateKey
       ),
-      b2:b2.configured(),
+      b2:await b2.configured(),
       websocket:true,
       webrtc_signaling:true
     }
@@ -504,12 +555,12 @@ router.get('/users/search',auth,async(req,res,next)=>{
     const limit = Math.min(Number(req.query.limit || 20),50);
 
     const result = await query(
-      `SELECT id,name,surname,username,bio,category,country,state,gender,
+      `SELECT id,first_name,surname,username,bio,category,country,state,gender,
               profile_photo_media_id
        FROM users
        WHERE account_status='active'
          AND id<>$1
-         AND ($2='' OR name LIKE '%'||$2||'%' OR surname LIKE '%'||$2||'%' OR username LIKE '%'||$2||'%')
+         AND ($2='' OR first_name LIKE '%'||$2||'%' OR surname LIKE '%'||$2||'%' OR username LIKE '%'||$2||'%')
          AND ($3 IS NULL OR country=$3)
          AND ($4 IS NULL OR gender=$4)
        ORDER BY created_at DESC
@@ -571,21 +622,30 @@ router.delete('/social/follow/:userId',auth,async(req,res,next)=>{
 
 router.post('/social/friend-request/:userId',auth,async(req,res,next)=>{
   try {
-    await query(
-      `INSERT OR IGNORE INTO friend_requests (sender_id, receiver_id)
-       VALUES($1,$2)`,
+    const existing = await query(
+      `SELECT id FROM friend_requests
+       WHERE sender_id=$1 AND receiver_id=$2
+       LIMIT 1`,
       [req.user.id,req.params.userId]
     );
 
-    await notify({
-      userId: req.params.userId,
-      actorId:req.user.id,
-      type:'FRIEND_REQUESTED',
-      title:'Friend request',
-      body:`${req.user.first_name} sent you a friend request`,
-      targetType:'user',
-      targetId:req.user.id
-    });
+    if (!existing.rows.length) {
+      await query(
+        `INSERT INTO friend_requests (id,sender_id,receiver_id)
+         VALUES($1,$2,$3)`,
+        [uuidv4(),req.user.id,req.params.userId]
+      );
+
+      await notify({
+        userId: req.params.userId,
+        actorId:req.user.id,
+        type:'FRIEND_REQUESTED',
+        title:'Friend request',
+        body:`${req.user.first_name} sent you a friend request`,
+        targetType:'user',
+        targetId:req.user.id
+      });
+    }
 
     res.status(201).json({success:true});
   } catch(err) {
@@ -676,9 +736,10 @@ router.get('/feed',auth,async(req,res,next)=>{
          p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
          u.first_name,u.surname,u.username,u.profile_photo_media_id,
          COALESCE(rc.reaction_count,0) reaction_count,
-         COALESCE(cc.comment_count,0) comment_count
-       , (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key
-       , (SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type
+         COALESCE(cc.comment_count,0) comment_count,
+         (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) AS viewer_reacted_int,
+         (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key,
+         (SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type
        FROM posts p
        JOIN users u ON u.id=p.author_id
        LEFT JOIN (
@@ -705,15 +766,16 @@ router.get('/feed',auth,async(req,res,next)=>{
       [req.user.id,limit,offset]
     );
 
-    const b2 = require("../providers/b2");
-    const posts = await Promise.all(result.rows.map(async r => {
+    const b2Provider = require("../providers/b2");
+
+    const withMedia = await Promise.all(result.rows.map(async r => {
       let mediaUrl = null;
       if (r.media_key) {
         try {
           if (String(r.media_key).indexOf("http") === 0) {
             mediaUrl = r.media_key;
           } else {
-            mediaUrl = await b2.signedDownload(r.media_key, 3600);
+            mediaUrl = await b2Provider.signedDownload(r.media_key, 3600);
           }
         } catch (e) {
           console.error("[FEED-MEDIA-SIGN]", e.message);
@@ -728,9 +790,11 @@ router.get('/feed',auth,async(req,res,next)=>{
       };
     }));
 
+    const withMentions = await attachMentions(withMedia);
+
     res.json({
       success:true,
-      posts,
+      posts:withMentions,
       pagination:{limit,offset}
     });
   } catch(err) {
@@ -742,13 +806,24 @@ router.post('/posts/:postId/reactions',auth,async(req,res,next)=>{
   try {
     const reaction = req.body.reaction || 'like';
 
-    await query(
-      `INSERT INTO reactions(id,post_id,user_id,type)
-       VALUES($1,$2,$3,$4)
-       ON CONFLICT(post_id,user_id)
-       DO UPDATE SET type=excluded.type`,
-      [uuidv4(), req.params.postId, req.user.id, reaction]
+    const existing = await query(
+      `SELECT id FROM reactions
+       WHERE post_id=$1 AND user_id=$2 LIMIT 1`,
+      [req.params.postId,req.user.id]
     );
+
+    if (existing.rows.length) {
+      await query(
+        `UPDATE reactions SET type=$1 WHERE id=$2`,
+        [reaction,existing.rows[0].id]
+      );
+    } else {
+      await query(
+        `INSERT INTO reactions(id,post_id,user_id,type)
+         VALUES($1,$2,$3,$4)`,
+        [uuidv4(),req.params.postId,req.user.id,reaction]
+      );
+    }
 
     res.json({success:true,reaction});
   } catch(err) {
@@ -834,9 +909,9 @@ router.post('/chat/conversations',auth,async(req,res,next)=>{
     }
 
     const conversation = await query(
-      `INSERT INTO conversations(type,created_by)
-       VALUES('direct',$1) RETURNING id`,
-      [req.user.id]
+      `INSERT INTO conversations(id,type,created_by)
+       VALUES($1,'direct',$2) RETURNING id`,
+      [uuidv4(),req.user.id]
     );
 
     const id = conversation.rows[0].id;
@@ -937,10 +1012,11 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
     const inserted = await query(
       `INSERT INTO messages
-       (conversation_id,sender_id,body,message_type,reply_to_message_id)
-       VALUES($1,$2,$3,$4,$5)
+       (id,conversation_id,sender_id,body,message_type,reply_to_message_id)
+       VALUES($1,$2,$3,$4,$5,$6)
        RETURNING *`,
       [
+        uuidv4(),
         req.params.id,
         req.user.id,
         text,
@@ -1001,10 +1077,11 @@ router.post('/calls',auth,async(req,res,next)=>{
 
     const result = await query(
       `INSERT INTO calls
-       (conversation_id,caller_id,receiver_id,type)
+       (id,conversation_id,caller_id,receiver_id,call_type)
        VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
+        uuidv4(),
         req.body.conversationId || null,
         req.user.id,
         req.body.receiverId,
@@ -1120,14 +1197,15 @@ router.post('/calls/:id/signal',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `INSERT INTO call_signals
-       (call_id,sender_id,signal_type,payload)
+       (id,call_id,sender_id,signal_type,payload)
        VALUES($1,$2,$3,$4,$5)
        RETURNING *`,
       [
+        uuidv4(),
         req.params.id,
         req.user.id,
         req.body.signalType,
-        req.body.payload || {}
+        JSON.stringify(req.body.payload || {})
       ]
     );
 
@@ -1145,10 +1223,10 @@ router.post('/calls/:id/signal',auth,async(req,res,next)=>{
 router.post('/blocks/:userId',auth,async(req,res,next)=>{
   try {
     await query(
-      `INSERT INTO blocks(blocker_id,blocked_id)
-       VALUES($1,$2)
+      `INSERT INTO blocks(id,blocker_id,blocked_id)
+       VALUES($1,$2,$3)
        ON CONFLICT DO NOTHING`,
-      [req.user.id,req.params.userId]
+      [uuidv4(),req.user.id,req.params.userId]
     );
 
     await query(
@@ -1189,10 +1267,11 @@ router.post('/reports',auth,async(req,res,next)=>{
   try {
     const result = await query(
       `INSERT INTO reports
-       (reporter_id,reported_user_id,post_id,message_id,category,description)
-       VALUES($1,$2,$3,$4,$5,$6)
+       (id,reporter_id,reported_user_id,post_id,message_id,category,description)
+       VALUES($1,$2,$3,$4,$5,$6,$7)
        RETURNING id,status,created_at`,
       [
+        uuidv4(),
         req.user.id,
         req.body.reportedUserId || null,
         req.body.postId || null,
@@ -1222,23 +1301,34 @@ router.post('/devices',auth,async(req,res,next)=>{
       });
     }
 
-    await query(
-      `INSERT INTO device_tokens
-       (user_id,token,device_type,device_model,os_version,app_version)
-       VALUES($1,$2,$3,$4,$5,$6,$7)
-       ON CONFLICT(user_id,token)
-       DO UPDATE SET
-         active=true,
-         updated_at=CURRENT_TIMESTAMP`,
-      [
-        req.user.id,
-        req.body.fcmToken,
-        req.body.deviceType || 'android',
-        req.body.deviceName || null,
-        req.body.osVersion || null,
-        req.body.appVersion || null
-      ]
+    const existing = await query(
+      `SELECT id FROM device_tokens WHERE token=$1 LIMIT 1`,
+      [req.body.fcmToken]
     );
+
+    if (existing.rows.length) {
+      await query(
+        `UPDATE device_tokens
+         SET user_id=$1,active=1,updated_at=CURRENT_TIMESTAMP
+         WHERE id=$2`,
+        [req.user.id,existing.rows[0].id]
+      );
+    } else {
+      await query(
+        `INSERT INTO device_tokens
+         (id,user_id,token,device_type,device_model,os_version,app_version,active)
+         VALUES($1,$2,$3,$4,$5,$6,$7,1)`,
+        [
+          uuidv4(),
+          req.user.id,
+          req.body.fcmToken,
+          req.body.deviceType || 'android',
+          req.body.deviceName || null,
+          req.body.osVersion || null,
+          req.body.appVersion || null
+        ]
+      );
+    }
 
     res.json({success:true});
   } catch(err) {
@@ -1250,8 +1340,8 @@ router.delete('/devices/:token',auth,async(req,res,next)=>{
   try {
     await query(
       `UPDATE device_tokens
-       SET active=false,updated_at=CURRENT_TIMESTAMP
-       WHERE recipient_id=$1 AND token=$2`,
+       SET active=0,updated_at=CURRENT_TIMESTAMP
+       WHERE user_id=$1 AND token=$2`,
       [req.user.id,req.params.token]
     );
 
@@ -1306,10 +1396,11 @@ router.post('/developer/api-keys',auth,async(req,res,next)=>{
 
     const result = await query(
       `INSERT INTO api_keys
-       (user_id,name,key_prefix,secret_hash)
-       VALUES($1,$2,$3,$4)
+       (id,user_id,name,key_prefix,secret_hash)
+       VALUES($1,$2,$3,$4,$5)
        RETURNING id,name,key_prefix,created_at`,
       [
+        uuidv4(),
         req.user.id,
         req.body.name || 'Connecto API Key',
         prefix,
@@ -1334,7 +1425,7 @@ router.get('/developer/api-keys',auth,async(req,res,next)=>{
     const result = await query(
       `SELECT id,name,key_prefix,last_used_at,created_at,revoked_at
        FROM api_keys
-       WHERE recipient_id=$1
+       WHERE user_id=$1
        ORDER BY created_at DESC`,
       [req.user.id]
     );
@@ -1368,7 +1459,7 @@ router.post('/developer/api-keys/:id/revoke',auth,async(req,res,next)=>{
 router.get('/settings',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `SELECT * FROM user_settings WHERE recipient_id=$1`,
+      `SELECT * FROM user_settings WHERE user_id=$1`,
       [req.user.id]
     );
 
@@ -1416,7 +1507,7 @@ router.patch('/settings',auth,async(req,res,next)=>{
 
     await query(
       `INSERT INTO user_settings(user_id)
-       VALUES($${n})
+       VALUES($1)
        ON CONFLICT DO NOTHING`,
       [req.user.id]
     );
@@ -1485,14 +1576,14 @@ router.post('/auth/change-password',auth,async(req,res,next)=>{
     await query(
       `UPDATE refresh_tokens
        SET revoked_at=CURRENT_TIMESTAMP
-       WHERE recipient_id=$1 AND revoked_at IS NULL`,
+       WHERE user_id=$1 AND revoked_at IS NULL`,
       [req.user.id]
     );
 
     await query(
       `INSERT INTO security_events(user_id,event_type,metadata)
        VALUES($1,'PASSWORD_CHANGED',$2)`,
-      [req.user.id,{time:new Date().toISOString()}]
+      [req.user.id,JSON.stringify({time:new Date().toISOString()})]
     );
 
     res.json({
