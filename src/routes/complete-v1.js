@@ -1301,8 +1301,8 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
     const inserted = await query(
       `INSERT INTO messages
-       (id,conversation_id,sender_id,body,message_type,reply_to_message_id)
-       VALUES($1,$2,$3,$4,$5,$6)
+       (id,conversation_id,sender_id,body,message_type,reply_to_message_id,media_url,duration_ms)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING *`,
       [
         uuidv4(),
@@ -1310,7 +1310,9 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
         req.user.id,
         text,
         req.body.messageType || 'text',
-        req.body.replyToId || null
+        req.body.replyToId || null,
+        req.body.mediaUrl || null,
+        req.body.durationMs || null
       ]
     );
 
