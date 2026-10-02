@@ -1357,6 +1357,78 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
 
 /* CALLS / WEBRTC SIGNALING */
 
+router.get('/me/friends',auth,async(req,res,next)=>{
+  try {
+    const limit = Math.min(Number(req.query.limit || 50), 100);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const q = String(req.query.q || '').trim().toLowerCase();
+
+    let rows;
+
+    if (q) {
+      const like = '%' + q + '%';
+      const r = await query(
+        `SELECT u.id, u.first_name, u.surname, u.username, u.bio, u.category, u.country,
+                u.profile_photo_media_id,
+                (SELECT 1 FROM follows f WHERE f.follower_id=$1 AND f.following_id=u.id LIMIT 1) AS is_following,
+                (SELECT 1 FROM friendships fr
+                   WHERE (fr.user_a_id=$1 AND fr.user_b_id=u.id) OR (fr.user_a_id=u.id AND fr.user_b_id=$1)
+                   LIMIT 1) AS is_friend,
+                (SELECT 1 FROM friend_requests frq
+                   WHERE frq.sender_id=$1 AND frq.receiver_id=u.id AND frq.status='pending'
+                   LIMIT 1) AS friend_request_sent
+           FROM users u
+          WHERE u.account_status='active'
+            AND u.deleted_at IS NULL
+            AND u.id<>$1
+            AND (lower(u.username) LIKE $2 OR lower(u.first_name) LIKE $2 OR lower(u.surname) LIKE $2)
+          ORDER BY u.created_at DESC
+          LIMIT $3 OFFSET $4`,
+        [req.user.id, like, limit, offset]
+      );
+      rows = r.rows;
+    } else {
+      const r = await query(
+        `SELECT u.id, u.first_name, u.surname, u.username, u.bio, u.category, u.country,
+                u.profile_photo_media_id,
+                (SELECT 1 FROM follows f WHERE f.follower_id=$1 AND f.following_id=u.id LIMIT 1) AS is_following,
+                (SELECT 1 FROM friendships fr
+                   WHERE (fr.user_a_id=$1 AND fr.user_b_id=u.id) OR (fr.user_a_id=u.id AND fr.user_b_id=$1)
+                   LIMIT 1) AS is_friend,
+                (SELECT 1 FROM friend_requests frq
+                   WHERE frq.sender_id=$1 AND frq.receiver_id=u.id AND frq.status='pending'
+                   LIMIT 1) AS friend_request_sent
+           FROM users u
+          WHERE u.account_status='active'
+            AND u.deleted_at IS NULL
+            AND u.id<>$1
+          ORDER BY u.created_at DESC
+          LIMIT $2 OFFSET $3`,
+        [req.user.id, limit, offset]
+      );
+      rows = r.rows;
+    }
+
+    const friends = rows.map(r => ({
+      id: r.id,
+      first_name: r.first_name,
+      surname: r.surname,
+      username: r.username,
+      bio: r.bio,
+      category: r.category,
+      country: r.country,
+      profile_photo_media_id: r.profile_photo_media_id,
+      is_following: !!r.is_following,
+      is_friend: !!r.is_friend,
+      friend_request_sent: !!r.friend_request_sent
+    }));
+
+    res.json({ success: true, friends, pagination: { limit, offset } });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/calls/ice-servers',auth,async(req,res,next)=>{
   try {
     const list = [
