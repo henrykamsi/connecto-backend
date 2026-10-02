@@ -794,6 +794,171 @@ router.get('/users/:id/posts',auth,async(req,res,next)=>{
   }
 });
 
+router.post('/link-preview',auth,async(req,res,next)=>{
+  try {
+    const rawUrl = String(req.body.url || '').trim();
+    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) {
+      return res.status(400).json({ success:false, error:'INVALID_URL' });
+    }
+
+    let parsed;
+    try {
+      parsed = new URL(rawUrl);
+    } catch (_) {
+      return res.status(400).json({ success:false, error:'INVALID_URL' });
+    }
+
+    if (!['http:','https:'].includes(parsed.protocol)) {
+      return res.status(400).json({ success:false, error:'INVALID_PROTOCOL' });
+    }
+
+    const host = parsed.hostname.toLowerCase();
+
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host.endsWith('.local') ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) ||
+      /^169\.254\./.test(host)
+    ) {
+      return res.status(400).json({ success:false, error:'BLOCKED_HOST' });
+    }
+
+    const cacheKey = rawUrl;
+
+    try {
+      const cached = await query(
+        `SELECT url, title, description, image_url, favicon_url, site_name FROM link_previews WHERE url=$1 LIMIT 1`,
+        [cacheKey]
+      );
+      if (cached.rows.length) {
+        return res.json({ success:true, preview:cached.rows[0], cached:true });
+      }
+    } catch (_) { }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    let html = '';
+    let contentType = '';
+    let statusCode = 0;
+
+    try {
+      const resp = await fetch(rawUrl, {
+        method:'GET',
+        redirect:'follow',
+        signal:controller.signal,
+        headers:{ 'User-Agent':'ConnectoBot/1.0 (+https://connecto.app)' }
+      });
+      statusCode = resp.status;
+      contentType = resp.headers.get('content-type') || '';
+      if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+        clearTimeout(timeout);
+        return res.status(400).json({ success:false, error:'NOT_HTML', status:statusCode });
+      }
+      const buf = await resp.arrayBuffer();
+      const max = 500 * 1024;
+      const slice = buf.byteLength > max ? buf.slice(0, max) : buf;
+      html = Buffer.from(slice).toString('utf8');
+    } catch (e) {
+      clearTimeout(timeout);
+      return res.status(502).json({ success:false, error:'FETCH_FAILED', details:String(e.message) });
+    }
+    clearTimeout(timeout);
+
+    function extractMeta(name) {
+      const patterns = [
+        new RegExp('<meta[^>]+property=["\']' + name + '["\'][^>]+content=["\']([^"\']*)["\']', 'i'),
+        new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]+property=["\']' + name + '["\']', 'i'),
+        new RegExp('<meta[^>]+name=["\']' + name + '["\'][^>]+content=["\']([^"\']*)["\']', 'i'),
+        new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]+name=["\']' + name + '["\']', 'i')
+      ];
+      for (const p of patterns) {
+        const m = html.match(p);
+        if (m && m[1]) return m[1].trim();
+      }
+      return null;
+    }
+
+    function decodeEntities(s) {
+      if (!s) return s;
+      return s
+        .replace(/&amp;/g,'&')
+        .replace(/&lt;/g,'<')
+        .replace(/&gt;/g,'>')
+        .replace(/&quot;/g,'"')
+        .replace(/&#39;/g,"'")
+        .replace(/&nbsp;/g,' ');
+    }
+
+    let title = extractMeta('og:title') || extractMeta('twitter:title');
+    if (!title) {
+      const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (m && m[1]) title = m[1].trim();
+    }
+
+    const description = extractMeta('og:description') || extractMeta('twitter:description') || extractMeta('description');
+    const imageRaw = extractMeta('og:image') || extractMeta('twitter:image') || extractMeta('twitter:image:src');
+    const siteName = extractMeta('og:site_name') || extractMeta('application-name') || host;
+
+    let favicon = null;
+    const iconMatches = html.match(/<link[^>]+rel=["\'](?:shortcut icon|icon|apple-touch-icon)["\'][^>]*>/gi);
+    if (iconMatches) {
+      for (const tag of iconMatches) {
+        const href = tag.match(/href=["\']([^"\']+)["\']/i);
+        if (href && href[1]) {
+          favicon = href[1];
+          break;
+        }
+      }
+    }
+
+    if (imageRaw && !/^https?:\/\//i.test(imageRaw)) {
+      try { imageRaw = new URL(imageRaw, parsed).href; } catch (_) { imageRaw = null; }
+    }
+    if (favicon && !/^https?:\/\//i.test(favicon)) {
+      try { favicon = new URL(favicon, parsed).href; } catch (_) { favicon = null; }
+    }
+    if (!favicon) {
+      favicon = parsed.origin + '/favicon.ico';
+    }
+
+    const preview = {
+      url: rawUrl,
+      title: decodeEntities(title) || host,
+      description: decodeEntities(description) || null,
+      image_url: imageRaw || null,
+      favicon_url: favicon,
+      site_name: decodeEntities(siteName) || host
+    };
+
+    try {
+      await query(
+        `INSERT INTO link_previews (url,title,description,image_url,favicon_url,site_name)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT(url) DO UPDATE SET
+           title=excluded.title,
+           description=excluded.description,
+           image_url=excluded.image_url,
+           favicon_url=excluded.favicon_url,
+           site_name=excluded.site_name,
+           updated_at=CURRENT_TIMESTAMP`,
+        [preview.url, preview.title, preview.description, preview.image_url, preview.favicon_url, preview.site_name]
+      );
+    } catch (e) {
+      console.error('[LINK-PREVIEW-CACHE]', e.message);
+    }
+
+    res.json({ success:true, preview, cached:false });
+  } catch(err) {
+    next(err);
+  }
+});
+
 router.get('/feed',auth,async(req,res,next)=>{
   try {
     const limit = Math.min(Number(req.query.limit || 20),50);
