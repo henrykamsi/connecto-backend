@@ -1045,6 +1045,8 @@ router.post('/posts/:postId/reactions',auth,async(req,res,next)=>{
       [req.params.postId,req.user.id]
     );
 
+    const wasNew = !existing.rows.length;
+
     if (existing.rows.length) {
       await query(
         `UPDATE reactions SET type=$1 WHERE id=$2`,
@@ -1056,6 +1058,28 @@ router.post('/posts/:postId/reactions',auth,async(req,res,next)=>{
          VALUES($1,$2,$3,$4)`,
         [uuidv4(),req.params.postId,req.user.id,reaction]
       );
+    }
+
+    if (wasNew) {
+      try {
+        const postOwner = await query(
+          `SELECT author_id FROM posts WHERE id=$1 LIMIT 1`,
+          [req.params.postId]
+        );
+        if (postOwner.rows.length && postOwner.rows[0].author_id !== req.user.id) {
+          await notify({
+            userId: postOwner.rows[0].author_id,
+            actorId: req.user.id,
+            type: 'POST_REACTED',
+            title: 'New reaction',
+            body: `${req.user.first_name} reacted to your post`,
+            targetType: 'post',
+            targetId: req.params.postId
+          });
+        }
+      } catch (e) {
+        console.error('[REACTION-NOTIFY]', e.message);
+      }
     }
 
     res.json({success:true,reaction});
@@ -1111,6 +1135,26 @@ router.post('/posts/:postId/comments',auth,async(req,res,next)=>{
         String(req.body.body).trim()
       ]
     );
+
+    try {
+      const postOwner = await query(
+        `SELECT author_id FROM posts WHERE id=$1 LIMIT 1`,
+        [req.params.postId]
+      );
+      if (postOwner.rows.length && postOwner.rows[0].author_id !== req.user.id) {
+        await notify({
+          userId: postOwner.rows[0].author_id,
+          actorId: req.user.id,
+          type: 'POST_COMMENTED',
+          title: 'New comment',
+          body: `${req.user.first_name} commented on your post`,
+          targetType: 'post',
+          targetId: req.params.postId
+        });
+      }
+    } catch (e) {
+      console.error('[COMMENT-NOTIFY]', e.message);
+    }
 
     res.status(201).json({
       success:true,
