@@ -677,6 +677,8 @@ router.get('/feed',auth,async(req,res,next)=>{
          u.first_name,u.surname,u.username,u.profile_photo_media_id,
          COALESCE(rc.reaction_count,0) reaction_count,
          COALESCE(cc.comment_count,0) comment_count
+       , (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key
+       , (SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type
        FROM posts p
        JOIN users u ON u.id=p.author_id
        LEFT JOIN (
@@ -703,10 +705,27 @@ router.get('/feed',auth,async(req,res,next)=>{
       [req.user.id,limit,offset]
     );
 
-    const posts = result.rows.map(r => ({
-      ...r,
-      viewer_has_reacted: Number(r.viewer_reacted_int) === 1,
-      viewer_reacted_int: undefined
+    const b2 = require("../providers/b2");
+    const posts = await Promise.all(result.rows.map(async r => {
+      let mediaUrl = null;
+      if (r.media_key) {
+        try {
+          if (String(r.media_key).indexOf("http") === 0) {
+            mediaUrl = r.media_key;
+          } else {
+            mediaUrl = await b2.signedDownload(r.media_key, 3600);
+          }
+        } catch (e) {
+          console.error("[FEED-MEDIA-SIGN]", e.message);
+          mediaUrl = null;
+        }
+      }
+      return {
+        ...r,
+        viewer_has_reacted: Number(r.viewer_reacted_int) === 1,
+        viewer_reacted_int: undefined,
+        media_url: mediaUrl
+      };
     }));
 
     res.json({
@@ -724,11 +743,11 @@ router.post('/posts/:postId/reactions',auth,async(req,res,next)=>{
     const reaction = req.body.reaction || 'like';
 
     await query(
-      `INSERT INTO reactions(post_id,user_id,type)
-       VALUES($1,$2,$3)
+      `INSERT INTO reactions(id,post_id,user_id,type)
+       VALUES($1,$2,$3,$4)
        ON CONFLICT(post_id,user_id)
        DO UPDATE SET type=excluded.type`,
-      [req.params.postId,req.user.id,reaction]
+      [uuidv4(), req.params.postId, req.user.id, reaction]
     );
 
     res.json({success:true,reaction});
