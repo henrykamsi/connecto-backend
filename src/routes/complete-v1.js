@@ -422,7 +422,15 @@ router.get('/auth/me',auth,(req,res)=>{
 
 router.post('/profile/complete',auth,async(req,res,next)=>{
   try {
-    const username = cleanUsername(req.body.username);
+    let username = cleanUsername(req.body.username);
+
+    if (!username) {
+      const current = await query(
+        `SELECT username FROM users WHERE id=$1 LIMIT 1`,
+        [req.user.id]
+      );
+      username = (current.rows[0] && current.rows[0].username) || "";
+    }
 
     if (!username || !/^[a-z0-9_]{3,32}$/.test(username)) {
       return res.status(400).json({
