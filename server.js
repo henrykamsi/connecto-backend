@@ -1108,7 +1108,7 @@ app.get("/api/v1/users/:id/following", async (req, res) => {
 app.get("/api/v1/users/:id/stats", async (req, res) => {
   try {
     const { query } = require("./src/db");
-    const followers = await query("SELECT COUNT(*) AS c FROM follows WHERE following_id=$1", [req.params.id]);
+    const followers = await query("SELECT COALESCE(display_followers, (SELECT COUNT(*) FROM follows WHERE following_id=u.id)) AS c FROM users u WHERE u.id=$1", [req.params.id]);
     const following = await query("SELECT COUNT(*) AS c FROM follows WHERE follower_id=$1", [req.params.id]);
     const posts = await query("SELECT COUNT(*) AS c FROM posts WHERE author_id=$1 AND deleted_at IS NULL", [req.params.id]);
     const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1", [req.params.id]);
