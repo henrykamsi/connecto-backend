@@ -3495,11 +3495,21 @@ app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
     console.log("[MESSAGES-V2] member ok, querying messages");
 
     const r = await query(
-      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.duration_ms, m.read_at, m.seen_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
       [req.params.id]
     );
 
     console.log("[MESSAGES-V2] got", r.rows.length, "messages");
+
+    // Auto-mark messages from OTHER users as delivered
+    try {
+      await query(
+        "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP) WHERE conversation_id=$1 AND sender_id != $2 AND delivered_at IS NULL",
+        [req.params.id, userId]
+      );
+    } catch (e) {
+      console.error("[MESSAGES-V2 delivered_at] ", e.message);
+    }
 
     res.json({ success: true, messages: r.rows });
   } catch (err) {
@@ -3507,6 +3517,31 @@ app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+app.post("/api/v1/chat/conversations/:id/seen", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [req.params.id, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    await query(
+      "UPDATE messages SET seen_at = COALESCE(seen_at, CURRENT_TIMESTAMP), read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE conversation_id=$1 AND sender_id != $2 AND seen_at IS NULL",
+      [req.params.id, userId]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
