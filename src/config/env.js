@@ -32,7 +32,7 @@ module.exports = {
 
   jwt: {
     secret: required("JWT_SECRET"),
-    expiresIn: process.env.JWT_EXPIRES_IN || "15m",
+    expiresIn: process.env.JWT_EXPIRES_IN || "90d",
     refreshTokenExpiresDays:
       Number(process.env.REFRESH_TOKEN_EXPIRES_DAYS || 30)
   },
