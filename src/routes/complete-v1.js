@@ -14,6 +14,7 @@ const { moderateMessage } = require('../services/moderation');
 const b2 = require('../providers/b2');
 
 const router = express.Router();
+router.use('/', require('./build1'));
 
 function accessToken(userId,sessionId) {
   return jwt.sign(
