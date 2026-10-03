@@ -1002,55 +1002,62 @@ router.get('/feed',auth,async(req,res,next)=>{
     const limit = Math.min(Number(req.query.limit || 20),50);
     const offset = Math.max(Number(req.query.offset || 0),0);
 
-    const result = await query(
-      `SELECT
-         p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
-         u.first_name,u.surname,u.username,u.profile_photo_media_id,
-         COALESCE(rc.reaction_count,0) reaction_count,
-         COALESCE(cc.comment_count,0) comment_count,
-         (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) AS viewer_reacted_int,
-         (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key,
-         (SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type
-       FROM posts p
-       JOIN users u ON u.id=p.author_id
-       LEFT JOIN (
-         SELECT post_id,COUNT(*) reaction_count
-         FROM reactions GROUP BY post_id
-       ) rc ON rc.post_id=p.id
-       LEFT JOIN (
-         SELECT post_id,COUNT(*) comment_count
-         FROM comments WHERE deleted_at IS NULL
-         GROUP BY post_id
-       ) cc ON cc.post_id=p.id
-       WHERE p.deleted_at IS NULL
-         AND u.account_status='active'
-         AND (
-           p.audience='public'
-           OR p.author_id=$1
-           OR EXISTS(
-             SELECT 1 FROM friendships f
-             WHERE (f.user_a_id=$1 AND f.user_b_id=p.author_id) OR (f.user_b_id=$1 AND f.user_a_id=p.author_id)
-           )
-         )
-       ORDER BY p.created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [req.user.id,limit,offset]
-    );
+    const seenRaw = String(req.query.seen || '').trim();
+    const seenIds = seenRaw.length
+      ? seenRaw.split(',').map(s => s.trim()).filter(s => s.length > 0)
+      : [];
 
-    const b2Provider = require("../providers/b2");
+    // Build a NOT IN clause for seen post ids
+    let seenClause = '';
+    const params = [req.user.id];
+    if (seenIds.length) {
+      const placeholders = seenIds.map((_, i) => '$' + (i + 2)).join(',');
+      seenClause = ' AND p.id NOT IN (' + placeholders + ')';
+      for (const id of seenIds) params.push(id);
+    }
+
+    const limitPlaceholder = '$' + (params.length + 1);
+    const offsetPlaceholder = '$' + (params.length + 2);
+
+    const sql =
+      'SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, ' +
+      'u.first_name, u.surname, u.username, u.profile_photo_media_id, ' +
+      'COALESCE(rc.reaction_count,0) reaction_count, ' +
+      'COALESCE(cc.comment_count,0) comment_count, ' +
+      '(SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) AS viewer_reacted_int, ' +
+      '(SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key, ' +
+      '(SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type ' +
+      'FROM posts p ' +
+      'JOIN users u ON u.id=p.author_id ' +
+      'LEFT JOIN ( SELECT post_id,COUNT(*) reaction_count FROM reactions GROUP BY post_id ) rc ON rc.post_id=p.id ' +
+      'LEFT JOIN ( SELECT post_id,COUNT(*) comment_count FROM comments WHERE deleted_at IS NULL GROUP BY post_id ) cc ON cc.post_id=p.id ' +
+      'WHERE p.deleted_at IS NULL ' +
+      'AND u.account_status=\'active\' ' +
+      'AND p.author_id != $1 ' +
+      'AND ( p.audience=\'public\' ' +
+      '   OR EXISTS( SELECT 1 FROM friendships f WHERE (f.user_a_id=$1 AND f.user_b_id=p.author_id) OR (f.user_b_id=$1 AND f.user_a_id=p.author_id) ) ' +
+      ')' +
+      seenClause +
+      ' ORDER BY p.created_at DESC ' +
+      ' LIMIT ' + limitPlaceholder + ' OFFSET ' + offsetPlaceholder;
+
+    params.push(limit, offset);
+
+    const result = await query(sql, params);
+
+    const b2Provider = require('../providers/b2');
 
     const withMedia = await Promise.all(result.rows.map(async r => {
       let mediaUrl = null;
       if (r.media_key) {
         try {
-          if (String(r.media_key).indexOf("http") === 0) {
+          if (String(r.media_key).indexOf('http') === 0) {
             mediaUrl = r.media_key;
           } else {
             mediaUrl = await b2Provider.signedDownload(r.media_key, 3600);
           }
         } catch (e) {
-          console.error("[FEED-MEDIA-SIGN]", e.message);
-          mediaUrl = null;
+          console.error('[FEED-MEDIA-SIGN]', e.message);
         }
       }
       return {
@@ -1064,11 +1071,11 @@ router.get('/feed',auth,async(req,res,next)=>{
     const withMentions = await attachMentions(withMedia);
 
     res.json({
-      success:true,
-      posts:withMentions,
-      pagination:{limit,offset}
+      success: true,
+      posts: withMentions,
+      pagination: { limit, offset, excluded: seenIds.length }
     });
-  } catch(err) {
+  } catch (err) {
     next(err);
   }
 });
