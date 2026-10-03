@@ -82,6 +82,13 @@ app.use(cors({
   credentials: true
 }));
 
+app.use(function logAllRequests(req, res, next) {
+  if (req.method !== "GET") return next();
+  if (req.path.startsWith("/control-api")) return next();
+  console.log("[REQ]", req.method, req.path);
+  next();
+});
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({
   extended: true,
