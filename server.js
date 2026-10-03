@@ -3511,7 +3511,7 @@ app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
     console.log("[MESSAGES-V2] member ok, querying messages");
 
     const r = await query(
-      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.duration_ms, m.read_at, m.seen_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.duration_ms, m.read_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
       [req.params.id]
     );
 
