@@ -1408,7 +1408,23 @@ app.get("/api/v1/chat/conversations/:id", async (req, res) => {
     if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
     const c = await query("SELECT * FROM conversations WHERE id=$1 LIMIT 1", [req.params.id]);
     if (!c.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
-    res.json({ success: true, conversation: c.rows[0] });
+
+    // Look up the OTHER member (the person the current user is chatting with)
+    const other = await query(
+      "SELECT u.id, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM conversation_members cm JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id=$1 AND cm.user_id != $2 LIMIT 1",
+      [req.params.id, userId]
+    );
+
+    const conversation = { ...c.rows[0] };
+    if (other.rows.length) {
+      conversation.other_user_id = other.rows[0].id;
+      conversation.other_username = other.rows[0].username;
+      conversation.other_first_name = other.rows[0].first_name;
+      conversation.other_surname = other.rows[0].surname;
+      conversation.other_photo = other.rows[0].profile_photo_media_id;
+    }
+
+    res.json({ success: true, conversation });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
