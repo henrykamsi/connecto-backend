@@ -115,7 +115,7 @@ async function attachMentions(rows) {
   if (!list.length) {
     return rows.map(r => ({ ...r, mentions: [] }));
   }
-  const placeholders = list.map((_, i) => `${i + 1}`).join(",");
+  const placeholders = list.map((_, i) => `$${i + 1}`).join(",");
   let found = { rows: [] };
   try {
     found = await query(
