@@ -734,9 +734,47 @@ router.post('/posts',auth,async(req,res,next)=>{
       ]
     );
 
+    const post = result.rows[0];
+
+    try {
+      const text = req.body.body || '';
+      const matches = String(text).match(/@([a-zA-Z0-9_]{3,32})/g) || [];
+      const seen = {};
+      const names = [];
+      for (const m of matches) {
+        const u = m.slice(1).toLowerCase();
+        if (!seen[u]) { seen[u] = true; names.push(u); }
+      }
+      if (names.length) {
+        const placeholders = names.map(function(_, i) { return "$" + (i + 1); }).join(",");
+        const users = await query(
+          'SELECT id, username FROM users WHERE lower(username) IN (' + placeholders + ')',
+          names
+        );
+        for (const u of users.rows) {
+          if (u.id === req.user.id) continue;
+          try {
+            await notify({
+              userId: u.id,
+              actorId: req.user.id,
+              type: 'USER_MENTIONED',
+              title: 'New mention',
+              body: req.user.first_name + ' mentioned you in a post',
+              targetType: 'post',
+              targetId: post.id
+            });
+          } catch (e) {
+            console.error('[MENTION-NOTIFY]', e.message);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[POST-MENTION]', e.message);
+    }
+
     res.status(201).json({
       success:true,
-      post:result.rows[0]
+      post
     });
   } catch(err) {
     next(err);
@@ -1344,6 +1382,30 @@ router.post('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
        WHERE id=$1`,
       [req.params.id]
     );
+
+    try {
+      const members = await query(
+        'SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id != $2',
+        [req.params.id, req.user.id]
+      );
+      for (const m of members.rows) {
+        try {
+          await notify({
+            userId: m.user_id,
+            actorId: req.user.id,
+            type: 'MESSAGE_RECEIVED',
+            title: req.user.first_name + ' sent you a message',
+            body: String(text).slice(0, 100),
+            targetType: 'conversation',
+            targetId: req.params.id
+          });
+        } catch (e) {
+          console.error('[MSG-NOTIFY]', e.message);
+        }
+      }
+    } catch (e) {
+      console.error('[MSG-NOTIFY-LOOKUP]', e.message);
+    }
 
     res.status(201).json({
       success:true,

@@ -11,12 +11,14 @@ async function notify({
   targetId=null,
   data={}
 }) {
+  const { v4: uuidv4 } = require('uuid');
   const result = await query(
     `INSERT INTO notifications
-     (recipient_id,actor_id,type,title,body,target_type,target_id,data)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+     (id,recipient_id,actor_id,type,title,body,target_type,target_id,data)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
      RETURNING *`,
     [
+      uuidv4(),
       userId,
       actorId,
       type,
