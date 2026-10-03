@@ -3476,6 +3476,7 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
 /* ---------- MESSAGES WITH STATUS FLAGS ---------- */
 
 app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
+  console.log("[MESSAGES-V2] start", req.params.id);
   try {
     const { query } = require("./src/db");
     const jwt = require("jsonwebtoken");
@@ -3486,16 +3487,23 @@ app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
     try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
+    console.log("[MESSAGES-V2] auth ok, user:", userId);
+
     const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [req.params.id, userId]);
     if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
 
+    console.log("[MESSAGES-V2] member ok, querying messages");
+
     const r = await query(
-      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.delivered_at, m.received_at, m.read_at, m.seen_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
       [req.params.id]
     );
 
+    console.log("[MESSAGES-V2] got", r.rows.length, "messages");
+
     res.json({ success: true, messages: r.rows });
   } catch (err) {
+    console.error("[MESSAGES-V2 ERROR]", err.message, err.stack);
     res.status(500).json({ success: false, error: err.message });
   }
 });
