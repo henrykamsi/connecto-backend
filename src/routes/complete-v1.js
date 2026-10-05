@@ -321,6 +321,45 @@ router.post('/auth/login',async(req,res,next)=>{
       });
     }
 
+    /* [PHASE-E] blocked/suspended checks */
+    try {
+      const blockCheck = await query(
+        `SELECT reason, expires_at FROM user_blocks
+         WHERE user_id=$1
+           AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+         ORDER BY blocked_at DESC LIMIT 1`,
+        [user.id]
+      );
+      if (blockCheck.rows.length) {
+        return res.status(403).json({
+          success: false,
+          blocked: true,
+          reason: blockCheck.rows[0].reason || "",
+          expires_at: blockCheck.rows[0].expires_at || null,
+          error: "ACCOUNT_BLOCKED"
+        });
+      }
+
+      const suspendCheck = await query(
+        `SELECT reason, expires_at FROM user_suspensions
+         WHERE user_id=$1
+           AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+         ORDER BY suspended_at DESC LIMIT 1`,
+        [user.id]
+      );
+      if (suspendCheck.rows.length) {
+        return res.status(403).json({
+          success: false,
+          suspended: true,
+          reason: suspendCheck.rows[0].reason || "",
+          expires_at: suspendCheck.rows[0].expires_at || null,
+          error: "ACCOUNT_SUSPENDED"
+        });
+      }
+    } catch (checkErr) {
+      console.error("[PHASE-E] login check failed:", checkErr.message);
+    }
+
     const session = await createSession(user.id,req,req.body);
 
     await query(
@@ -421,11 +460,26 @@ router.post('/auth/logout',auth,async(req,res,next)=>{
   }
 });
 
-router.get('/auth/me',auth,(req,res)=>{
-  res.json({
-    success:true,
-    user:req.user
-  });
+router.get('/auth/me',auth,async(req,res)=>{
+  try {
+    const r = await query(
+      `SELECT id, name, surname, email, username, first_name,
+              bio, category, country, state, gender,
+              profile_photo_media_id, cover_photo_media_id,
+              is_verified, is_owner, email_verified
+       FROM users WHERE id=$1 LIMIT 1`,
+      [req.user.id]
+    );
+    if (!r.rows.length) {
+      return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
+    }
+    res.json({
+      success: true,
+      user: r.rows[0]
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 /* PROFILE */
