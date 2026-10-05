@@ -2554,8 +2554,8 @@ router.post("/pending-verification/:id/decline", controlAuth, async (req, res) =
 });
 
 console.log("[PHASE-A] verification endpoints ready");
-/* [FIX-SUBMIT-PATH] Aliases so Android's /api/v1/* calls hit /control-api/* handlers */
-router.post("/api/v1/verification/submit", controlAuth, async (req, res) => {
+/* [FIX-API-PATHS-V2] Aliases. Mounted at /control-api, so paths are /v1/... */
+router.post("/v1/verification/submit", controlAuth, async (req, res) => {
   try {
     const realName = String(req.body.realName || "").trim();
     const realSurname = String(req.body.realSurname || "").trim();
@@ -2593,7 +2593,7 @@ router.post("/api/v1/verification/submit", controlAuth, async (req, res) => {
   }
 });
 
-router.post("/api/v1/verification/verify-domain", controlAuth, async (req, res) => {
+router.post("/v1/verification/verify-domain", controlAuth, async (req, res) => {
   try {
     const domain = String(req.body.domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
     const method = String(req.body.method || "meta");
@@ -2638,7 +2638,7 @@ router.post("/api/v1/verification/verify-domain", controlAuth, async (req, res) 
   }
 });
 
-router.get("/api/v1/me/bookmarks", controlAuth, async (req, res) => {
+router.get("/v1/me/bookmarks", controlAuth, async (req, res) => {
   try {
     const r = await query(
       "SELECT p.id, p.text, p.author_id, p.created_at, u.first_name, u.surname, u.username, u.is_verified AS author_verified FROM bookmarks b JOIN posts p ON p.id = b.post_id JOIN users u ON u.id = p.author_id WHERE b.user_id=$1 AND p.deleted_at IS NULL ORDER BY b.created_at DESC LIMIT 100",
@@ -2650,7 +2650,7 @@ router.get("/api/v1/me/bookmarks", controlAuth, async (req, res) => {
   }
 });
 
-router.get("/api/v1/pending-verification", controlAuth, async (req, res) => {
+router.get("/v1/pending-verification", controlAuth, async (req, res) => {
   try {
     const r = await query("SELECT id, message FROM pending_verifications WHERE user_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1", [req.admin.id]);
     if (!r.rows.length) {
@@ -2662,7 +2662,7 @@ router.get("/api/v1/pending-verification", controlAuth, async (req, res) => {
   }
 });
 
-router.post("/api/v1/pending-verification/:id/accept", controlAuth, async (req, res) => {
+router.post("/v1/pending-verification/:id/accept", controlAuth, async (req, res) => {
   try {
     await run("UPDATE pending_verifications SET status='accepted' WHERE id=$1 AND user_id=$2", [req.params.id, req.admin.id]);
     await run("UPDATE users SET is_verified=1, verified_label='Verified Account', updated_at=CURRENT_TIMESTAMP WHERE id=$1", [req.admin.id]);
@@ -2672,7 +2672,7 @@ router.post("/api/v1/pending-verification/:id/accept", controlAuth, async (req, 
   }
 });
 
-router.post("/api/v1/pending-verification/:id/decline", controlAuth, async (req, res) => {
+router.post("/v1/pending-verification/:id/decline", controlAuth, async (req, res) => {
   try {
     await run("UPDATE pending_verifications SET status='declined' WHERE id=$1 AND user_id=$2", [req.params.id, req.admin.id]);
     res.json({ success: true });
