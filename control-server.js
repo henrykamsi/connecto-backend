@@ -2492,10 +2492,17 @@ router.post("/verification/submit", controlAuth, async (req, res) => {
     }
     const requestId = existing.rows[0].id;
 
+    const idPhotoBase64 = String(req.body.idPhotoBase64 || "").trim();
+    const idPhotoMime = String(req.body.idPhotoMime || "image/jpeg").trim();
+
     await run(
-      "UPDATE verification_requests SET real_name=$1, real_surname=$2, age=$3, notes=$4, category=$5, social_links=$6, status='pending' WHERE id=$7",
-      [realName, realSurname, age, notes, category, socialLinks, requestId]
+      "UPDATE verification_requests SET real_name=$1, real_surname=$2, age=$3, notes=$4, category=$5, social_links=$6, status='pending', passport_image=$7 WHERE id=$8",
+      [realName, realSurname, age, notes, category, socialLinks,
+       idPhotoBase64 ? (idPhotoMime + "|" + idPhotoBase64) : null,
+       requestId]
     );
+
+    console.log("[PHASE-C] photo storage ready");
 
     res.json({ success: true, requestId });
   } catch (err) {
