@@ -463,7 +463,7 @@ router.post('/auth/logout',auth,async(req,res,next)=>{
 router.get('/auth/me',auth,async(req,res)=>{
   try {
     const r = await query(
-      `SELECT id, name, surname, email, username, first_name,
+      `SELECT id, first_name, surname, email, username,
               bio, category, country, state, gender,
               profile_photo_media_id, cover_photo_media_id,
               is_verified, is_owner, email_verified
