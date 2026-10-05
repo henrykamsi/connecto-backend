@@ -2392,7 +2392,10 @@ router.delete("/banned-words/:id", controlAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-console.log("[CONTROL] new endpoints ready"); * PHASE A - Verification endpoints, bookmarks
+console.log("[CONTROL] new endpoints ready");
+
+/* ============================================================================
+ * PHASE A - Verification endpoints, bookmarks
  * ==========================================================================*/
 
 router.get("/me/bookmarks", controlAuth, async (req, res) => {
