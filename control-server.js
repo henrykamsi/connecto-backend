@@ -2425,7 +2425,7 @@ router.post("/verification/start", controlAuth, async (req, res) => {
   }
 });
 
-router.post("/verification/verify-domain", controlAuth, async (req, res) => {
+router.post("/verification/verify-domain", async (req, res) => {
   try {
     const domain = String(req.body.domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
     const method = String(req.body.method || "meta");
@@ -2440,7 +2440,7 @@ router.post("/verification/verify-domain", controlAuth, async (req, res) => {
         const resp = await fetch(url, { redirect: "follow", headers: { "User-Agent": "ConnectoVerify/1.0" } });
         const html = await resp.text();
         if (html.includes(token)) {
-          await run("UPDATE verification_requests SET domain=$1, domain_method=$2, domain_verified=1, domain_token=$3 WHERE user_id=$4 AND status='pending'", [domain, method, token, req.admin.id]);
+          await run("UPDATE verification_requests SET domain=$1, domain_method=$2, domain_verified=1, domain_token=$3 WHERE user_id=$4 AND status='pending'", [domain, method, token, (req.admin ? req.admin.id : req.user ? req.user.id : null)]);
           return res.json({ success: true, verified: true });
         }
         return res.json({ success: true, verified: false, reason: "META_TAG_NOT_FOUND" });
@@ -2455,7 +2455,7 @@ router.post("/verification/verify-domain", controlAuth, async (req, res) => {
         const records = await dns.resolveTxt(domain);
         const flat = records.map(r => r.join("")).join(" ");
         if (flat.includes(token)) {
-          await run("UPDATE verification_requests SET domain=$1, domain_method=$2, domain_verified=1, domain_token=$3 WHERE user_id=$4 AND status='pending'", [domain, method, token, req.admin.id]);
+          await run("UPDATE verification_requests SET domain=$1, domain_method=$2, domain_verified=1, domain_token=$3 WHERE user_id=$4 AND status='pending'", [domain, method, token, (req.admin ? req.admin.id : req.user ? req.user.id : null)]);
           return res.json({ success: true, verified: true });
         }
         return res.json({ success: true, verified: false, reason: "DNS_RECORD_NOT_FOUND" });
