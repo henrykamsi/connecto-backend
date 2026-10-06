@@ -3594,7 +3594,24 @@ app.get("/api/v1/reels", async (req, res) => {
       [limit, offset]
     );
 
-    res.json({ success: true, posts: r.rows, pagination: { limit, offset } });
+    const b2Provider = require("./src/providers/b2");
+    const signedPosts = await Promise.all(r.rows.map(async (row) => {
+      let mediaUrl = null;
+      if (row.media_url) {
+        try {
+          if (String(row.media_url).indexOf("http") === 0) {
+            mediaUrl = row.media_url;
+          } else {
+            mediaUrl = await b2Provider.signedDownload(row.media_url, 3600);
+          }
+        } catch (e) {
+          console.error("[REELS-MEDIA-SIGN]", e.message);
+        }
+      }
+      return { ...row, media_url: mediaUrl };
+    }));
+
+    res.json({ success: true, posts: signedPosts, pagination: { limit, offset } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
