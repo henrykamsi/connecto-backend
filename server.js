@@ -965,7 +965,7 @@ app.get("/api/v1/posts/:id/comments", async (req, res) => {
     const offset = Math.max(Number(req.query.offset || 0), 0);
 
     const r = await query(
-      "SELECT c.id, c.post_id, c.author_id, c.parent_comment_id, c.body, c.created_at, c.updated_at, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM comments c JOIN users u ON u.id = c.author_id WHERE c.post_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT $2 OFFSET $3",
+      "SELECT c.id, c.post_id, c.author_id, c.parent_comment_id, c.body, c.created_at, c.updated_at, u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified FROM comments c JOIN users u ON u.id = c.author_id WHERE c.post_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at ASC LIMIT $2 OFFSET $3",
       [req.params.id, limit, offset]
     );
 
