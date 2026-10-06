@@ -1052,7 +1052,7 @@ app.get("/api/v1/users/:id", async (req, res) => {
   try {
     const { query } = require("./src/db");
     const u = await query(
-      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id, account_status FROM users WHERE id=$1 AND deleted_at IS NULL LIMIT 1",
+      "SELECT id, first_name, surname, username, bio, category, country, state, gender, profile_photo_media_id, cover_photo_media_id, is_verified, is_owner, account_status FROM users WHERE id=$1 AND deleted_at IS NULL LIMIT 1",
       [req.params.id]
     );
     if (!u.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
