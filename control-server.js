@@ -2392,25 +2392,53 @@ router.delete("/banned-words/:id", controlAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-/* [CONTROL-ORG-POST] Post as organization from the control panel */
+/* [CONTROL-ORG-POST-V2] Post as organization — system user owns the post */
 router.post("/organizations/:id/post", controlAuth, async (req, res) => {
   try {
     const { v4: uuidv4 } = require("uuid");
+
+    const title = String(req.body.title || "").trim();
     const text = String(req.body.text || "").trim();
     if (!text) return res.status(400).json({ success: false, error: "TEXT_REQUIRED" });
 
     const org = await get("SELECT * FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
     if (!org) return res.status(404).json({ success: false, error: "ORG_NOT_FOUND" });
 
+    // Find or create a system user for organization posts
+    let systemUser = await get(
+      "SELECT id FROM users WHERE username='connecto_system' LIMIT 1"
+    );
+
+    if (!systemUser) {
+      const sysId = uuidv4();
+      await run(
+        "INSERT INTO users (id, first_name, surname, email, username, password_hash, account_status) VALUES ($1,'Connecto','System','system@connecto.app','connecto_system','$2a$10$disabled','active')",
+        [sysId]
+      );
+      systemUser = { id: sysId };
+    }
+
+    const sysUserId = systemUser.id;
+
+    // Ensure optional columns exist (safe if already present)
+    try { await run("ALTER TABLE posts ADD COLUMN title TEXT"); } catch (e) {}
+    try { await run("ALTER TABLE posts ADD COLUMN initial_likes INTEGER DEFAULT 0"); } catch (e) {}
+    try { await run("ALTER TABLE posts ADD COLUMN initial_shares INTEGER DEFAULT 0"); } catch (e) {}
+    try { await run("ALTER TABLE posts ADD COLUMN initial_comments INTEGER DEFAULT 0"); } catch (e) {}
+
     const postId = uuidv4();
+    const likes = Number(req.body.likes) || 0;
+    const shares = Number(req.body.shares) || 0;
+    const comments = Number(req.body.comments) || 0;
+
     await run(
-      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled) VALUES ($1,$2,$3,'public',1,1)",
-      [postId, org.owner_id, text]
+      "INSERT INTO posts (id, author_id, text, title, audience, comments_enabled, share_enabled, initial_likes, initial_shares, initial_comments) VALUES ($1,$2,$3,$4,'public',1,1,$5,$6,$7)",
+      [postId, sysUserId, text, title || null, likes, shares, comments]
     );
 
     await run(
       "INSERT INTO organization_posts (id, organization_id, posted_by_user_id, post_id) VALUES ($1,$2,$3,$4)",
-      [uuidv4(), req.params.id, org.owner_id, postId]
+      [uuidv4(), req.params.id, sysUserId, postId]
     );
 
     await audit({
@@ -2420,7 +2448,7 @@ router.post("/organizations/:id/post", controlAuth, async (req, res) => {
       targetType: "organization",
       targetId: req.params.id,
       targetLabel: org.name,
-      newValue: { post_id: postId, text: text.slice(0, 200) },
+      newValue: { post_id: postId, title, text: text.slice(0, 200) },
       ip: req.ip,
       userAgent: req.headers["user-agent"] || null
     });
