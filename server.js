@@ -3923,31 +3923,110 @@ app.post("/api/v1/ad-revenue/cancel", monetizationAuth(), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+/* [AD-REVENUE-V2] 1 cent USD per counted view, 80% count rate, 5 views/creator/minute */
 app.post("/api/v1/ad-revenue/log-view", monetizationAuth(), async (req, res) => {
   try {
     const { query, run } = require("./src/db");
     const { v4: uuidv4 } = require("uuid");
+
     const creatorId = String(req.body.creator_id || "").trim();
     if (!creatorId) return res.status(400).json({ success: false, error: "CREATOR_ID_REQUIRED" });
     if (creatorId === req.user.id) return res.status(400).json({ success: false, error: "CANNOT_SUPPORT_SELF" });
 
-    const cfg = await query("SELECT * FROM ad_revenue_config WHERE user_id=$1 AND enabled=1 LIMIT 1", [creatorId]);
-    if (!cfg.rows.length) return res.status(404).json({ success: false, error: "AD_REVENUE_NOT_ENABLED" });
+    // --- ensure tracking tables/columns exist ---
+    try {
+      await run("CREATE TABLE IF NOT EXISTS ad_view_limits (visitor_id TEXT NOT NULL, creator_id TEXT NOT NULL, window_start TEXT NOT NULL, view_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(visitor_id, creator_id, window_start))");
+    } catch (e) {}
+    try { await run("ALTER TABLE wallets ADD COLUMN balance_usd_cents INTEGER NOT NULL DEFAULT 0"); } catch (e) {}
 
-    const recent = await query("SELECT COUNT(*) AS c FROM ad_revenue_clicks WHERE creator_id=$1 AND created_at > datetime('now','-1 day')", [creatorId]);
-    const total = Number(recent.rows[0].c || 0);
-    const counts = (total % 10) < 7;
-    await run("INSERT INTO ad_revenue_clicks (id, creator_id, visitor_id, counted) VALUES ($1, $2, $3, $4)", [uuidv4(), creatorId, req.user.id, counts ? 1 : 0]);
+    // --- rate limit: 5 views per creator per rolling minute ---
+    const nowMs = Date.now();
+    const windowKey = String(Math.floor(nowMs / 60000)); // one bucket per minute
 
-    if (counts) {
-      const payout = Number(process.env.REWARDED_AD_CREATOR_PAYOUT_NGN || 5);
-      await ensureWallet(creatorId);
-      await run("UPDATE wallets SET balance_ngn = balance_ngn + $1, updated_at=CURRENT_TIMESTAMP WHERE user_id=$2", [payout, creatorId]);
-      await run("INSERT INTO wallet_transactions (id, user_id, amount_ngn, type, reference, description) VALUES ($1, $2, $3, 'ad_revenue', $4, $5)", [uuidv4(), creatorId, payout, "adrev-" + uuidv4(), "Rewarded ad view from visitor"]);
+    const existing = await query(
+      "SELECT view_count FROM ad_view_limits WHERE visitor_id=$1 AND creator_id=$2 AND window_start=$3 LIMIT 1",
+      [req.user.id, creatorId, windowKey]
+    );
+
+    const currentCount = existing.rows.length ? Number(existing.rows[0].view_count) : 0;
+
+    if (currentCount >= 5) {
+      const resetInSeconds = 60 - Math.floor((nowMs % 60000) / 1000);
+      return res.status(429).json({
+        success: false,
+        error: "RATE_LIMITED",
+        message: "You have reached the limit for this creator. Try again in " + resetInSeconds + " seconds, or watch another creator.",
+        retryAfterSeconds: resetInSeconds,
+        creator_id: creatorId
+      });
     }
 
-    res.json({ success: true, counted: counts });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+    // increment the minute counter
+    if (existing.rows.length) {
+      await run(
+        "UPDATE ad_view_limits SET view_count = view_count + 1 WHERE visitor_id=$1 AND creator_id=$2 AND window_start=$3",
+        [req.user.id, creatorId, windowKey]
+      );
+    } else {
+      await run(
+        "INSERT INTO ad_view_limits (visitor_id, creator_id, window_start, view_count) VALUES ($1,$2,$3,1)",
+        [req.user.id, creatorId, windowKey]
+      );
+    }
+
+    // --- 80% count rule: skip every 5th view (deterministic, hash-based) ---
+    const crypto = require("crypto");
+    const hashInput = req.user.id + "|" + creatorId + "|" + windowKey + "|" + currentCount;
+    const hash = crypto.createHash("sha256").update(hashInput).digest("hex");
+    const bucket = parseInt(hash.slice(0, 8), 16) % 5; // 0..4
+    const counts = bucket !== 0; // 80% chance to count
+
+    await run(
+      "INSERT INTO ad_revenue_clicks (id, creator_id, visitor_id, counted) VALUES ($1, $2, $3, $4)",
+      [uuidv4(), creatorId, req.user.id, counts ? 1 : 0]
+    );
+
+    if (counts) {
+      // payout: 1 cent USD, stored as integer cents
+      const payoutCents = 1;
+      const usdToNgn = Number(process.env.USD_TO_NGN_RATE || 1300);
+      const payoutNgn = Math.round((payoutCents / 100) * usdToNgn);
+
+      // ensure wallet exists
+      const w = await query("SELECT user_id FROM wallets WHERE user_id=$1 LIMIT 1", [creatorId]);
+      if (!w.rows.length) {
+        await run("INSERT INTO wallets (user_id, balance_ngn, threshold_ngn, balance_usd_cents) VALUES ($1, 0, 7500, 0)", [creatorId]);
+      }
+
+      await run(
+        "UPDATE wallets SET balance_usd_cents = COALESCE(balance_usd_cents,0) + $1, updated_at=CURRENT_TIMESTAMP WHERE user_id=$2",
+        [payoutCents, creatorId]
+      );
+
+      await run(
+        "INSERT INTO wallet_transactions (id, user_id, amount_ngn, type, reference, description) VALUES ($1, $2, $3, 'ad_revenue', $4, $5)",
+        [uuidv4(), creatorId, payoutNgn, "adrev-" + uuidv4(), "Rewarded ad view (1 cent USD)"]
+      );
+
+      return res.json({
+        success: true,
+        counted: true,
+        payout_usd_cents: payoutCents,
+        payout_ngn_equivalent: payoutNgn,
+        remaining_views_this_minute: 5 - (currentCount + 1)
+      });
+    }
+
+    return res.json({
+      success: true,
+      counted: false,
+      reason: "SERVER_MAINTENANCE_SKIP",
+      remaining_views_this_minute: 5 - (currentCount + 1)
+    });
+  } catch (e) {
+    console.error("[AD-REVENUE-V2]", e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 app.get("/api/v1/ad-revenue/earnings", monetizationAuth(), async (req, res) => {
