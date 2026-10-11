@@ -2392,6 +2392,51 @@ router.delete("/banned-words/:id", controlAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
+/* [CONTROL-ORG-POST] Post as organization from the control panel */
+router.post("/organizations/:id/post", controlAuth, async (req, res) => {
+  try {
+    const { v4: uuidv4 } = require("uuid");
+    const text = String(req.body.text || "").trim();
+    if (!text) return res.status(400).json({ success: false, error: "TEXT_REQUIRED" });
+
+    const org = await get("SELECT * FROM organizations WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!org) return res.status(404).json({ success: false, error: "ORG_NOT_FOUND" });
+
+    const postId = uuidv4();
+    await run(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled) VALUES ($1,$2,$3,'public',1,1)",
+      [postId, org.owner_id, text]
+    );
+
+    await run(
+      "INSERT INTO organization_posts (id, organization_id, posted_by_user_id, post_id) VALUES ($1,$2,$3,$4)",
+      [uuidv4(), req.params.id, org.owner_id, postId]
+    );
+
+    await audit({
+      adminId: req.admin.id,
+      adminEmail: req.admin.email,
+      action: "ORG_POST_CREATED",
+      targetType: "organization",
+      targetId: req.params.id,
+      targetLabel: org.name,
+      newValue: { post_id: postId, text: text.slice(0, 200) },
+      ip: req.ip,
+      userAgent: req.headers["user-agent"] || null
+    });
+
+    res.status(201).json({
+      success: true,
+      post_id: postId,
+      organization: { id: org.id, name: org.name },
+      attribution: "organization"
+    });
+  } catch (err) {
+    console.error("[CONTROL-ORG-POST]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 console.log("[CONTROL] new endpoints ready");
 
 /* ============================================================================

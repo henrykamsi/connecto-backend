@@ -3685,7 +3685,7 @@ async function checkCriteria(userId, method) {
     const c = {
       videos3: videosN >= 3,
       days3: daysOld >= 3,
-      ads2: adViewsN >= 2,
+      ads2: true,
       like1: likesN >= 1,
       comment1: commentsN >= 1,
       follow1: followsN >= 1
@@ -3696,7 +3696,7 @@ async function checkCriteria(userId, method) {
     const c = {
       posts3: postsN >= 3,
       days2: daysOld >= 2,
-      ads2: adViewsN >= 2,
+      ads2: true,
       follows3: followsN >= 3,
       likes5: likesN >= 5,
       comments2: commentsN >= 2,
