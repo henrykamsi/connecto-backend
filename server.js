@@ -3997,7 +3997,7 @@ app.post("/api/v1/ad-revenue/log-view", monetizationAuth(), async (req, res) => 
       });
     }
 
-    const payoutNgn = Number(process.env.REWARDED_AD_CREATOR_PAYOUT_NGN || 5);
+    const payoutNgn = Number(process.env.REWARDED_AD_CREATOR_PAYOUT_NGN || 2);
 
     await run(
       "UPDATE wallets SET balance_ngn = COALESCE(balance_ngn,0) + $1, updated_at=CURRENT_TIMESTAMP WHERE user_id=$2",
