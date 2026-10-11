@@ -3668,7 +3668,7 @@ async function checkCriteria(userId, method) {
   const likes = await query("SELECT COUNT(*) AS c FROM reactions WHERE user_id=$1", [userId]);
   const comments = await query("SELECT COUNT(DISTINCT post_id) AS c FROM comments WHERE author_id=$1 AND deleted_at IS NULL", [userId]);
   const follows = await query("SELECT COUNT(*) AS c FROM follows WHERE follower_id=$1", [userId]);
-  const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1 OR user_b_id=$1", [userId]);
+  const friends = await query("SELECT COUNT(*) AS c FROM friend_requests WHERE sender_id=$1", [userId]);
 
   const adViews = await query("SELECT COUNT(*) AS c FROM ad_revenue_clicks WHERE visitor_id=$1", [userId]);
 
