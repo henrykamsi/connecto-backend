@@ -4293,6 +4293,80 @@ app.delete("/api/v1/posts/:id/pin", async (req, res) => {
   }
 });
 
+/* [REPOST-ENDPOINTS] Repost to profile and to reels */
+app.post("/api/v1/posts/:id/repost-to-profile", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const { v4: uuidv4 } = require("uuid");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const originalId = req.params.id;
+    const original = await query("SELECT id, author_id FROM posts WHERE id=$1 AND deleted_at IS NULL LIMIT 1", [originalId]);
+    if (!original.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+
+    // Idempotent: if already reposted by this user, return the existing one
+    const existing = await query("SELECT id FROM posts WHERE original_post_id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [originalId, userId]);
+    if (existing.rows.length) {
+      return res.json({ success: true, post_id: existing.rows[0].id, alreadyReposted: true });
+    }
+
+    const newId = uuidv4();
+    await run(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, original_post_id) VALUES ($1,$2,NULL,'public',1,1,$3)",
+      [newId, userId, originalId]
+    );
+
+    res.status(201).json({ success: true, post_id: newId });
+  } catch (err) {
+    console.error("[REPOST-PROFILE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/posts/:id/repost-to-reels", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const { v4: uuidv4 } = require("uuid");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const originalId = req.params.id;
+    const original = await query("SELECT id, author_id FROM posts WHERE id=$1 AND deleted_at IS NULL LIMIT 1", [originalId]);
+    if (!original.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+
+    const existing = await query("SELECT id FROM posts WHERE original_post_id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [originalId, userId]);
+    if (existing.rows.length) {
+      return res.json({ success: true, post_id: existing.rows[0].id, alreadyReposted: true });
+    }
+
+    const newId = uuidv4();
+    await run(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, original_post_id) VALUES ($1,$2,NULL,'reels',1,1,$3)",
+      [newId, userId, originalId]
+    );
+
+    res.status(201).json({ success: true, post_id: newId });
+  } catch (err) {
+    console.error("[REPOST-REELS]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
 /* [PIN-ENDPOINTS] ensure column exists on boot */
 (async () => {
   try {
