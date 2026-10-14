@@ -1062,17 +1062,56 @@ app.get("/api/v1/users/:id", async (req, res) => {
   }
 });
 
+/* [USER-POSTS-MEDIA] Replaces the basic handler; returns media_type + signed media_url */
 app.get("/api/v1/users/:id/posts", async (req, res) => {
   try {
     const { query } = require("./src/db");
+    const b2 = require("./src/providers/b2");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    try { jwt.verify(authHeader.slice(7), envLocal.jwt.secret); }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
     const limit = Math.min(Number(req.query.limit || 20), 50);
     const offset = Math.max(Number(req.query.offset || 0), 0);
+    const type = String(req.query.type || "").toLowerCase();
+
+    let extra = "";
+    if (type === "image") extra = " AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='image' AND m.deleted_at IS NULL)";
+    else if (type === "video") extra = " AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='video' AND m.deleted_at IS NULL)";
+
     const r = await query(
-      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.author_id=$1 AND p.deleted_at IS NULL AND p.audience='public' ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, " +
+      "u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified, " +
+      "COALESCE(p.view_count, 0) AS view_count, " +
+      "(u.pinned_post_id = p.id) AS pinned, " +
+      "(SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key, " +
+      "(SELECT m.type FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_type " +
+      "FROM posts p JOIN users u ON u.id = p.author_id " +
+      "WHERE p.author_id=$1 AND p.deleted_at IS NULL AND p.audience='public'" + extra + " " +
+      "ORDER BY p.created_at DESC LIMIT $2 OFFSET $3",
       [req.params.id, limit, offset]
     );
-    res.json({ success: true, posts: r.rows, pagination: { limit, offset } });
+
+    const posts = await Promise.all(r.rows.map(async (row) => {
+      let mediaUrl = null;
+      if (row.media_key) {
+        try {
+          mediaUrl = String(row.media_key).indexOf("http") === 0
+            ? row.media_key
+            : await b2.signedDownload(row.media_key, 3600);
+        } catch (e) { console.error("[USER-POSTS-MEDIA]", e.message); }
+      }
+      const { media_key, ...rest } = row;
+      return { ...rest, media_url: mediaUrl };
+    }));
+
+    res.json({ success: true, posts, pagination: { limit, offset } });
   } catch (err) {
+    console.error("[USER-POSTS-MEDIA]", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
