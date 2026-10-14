@@ -4500,15 +4500,15 @@ app.get("/api/v1/reels", async (req, res) => {
               'video' AS media_type,
               (SELECT COUNT(*) FROM reactions r WHERE r.post_id=p.id) AS reaction_count,
               (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND c.deleted_at IS NULL) AS comment_count,
-              (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$3 LIMIT 1) AS viewer_reacted_int
+              (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) AS viewer_reacted_int
        FROM posts p
        JOIN users u ON u.id = p.author_id
        WHERE p.deleted_at IS NULL
          AND u.account_status='active'
          AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='video' AND m.deleted_at IS NULL)
        ORDER BY p.created_at DESC
-       LIMIT $1 OFFSET $2`,
-      [limit, offset, userId]
+       LIMIT $2 OFFSET $3`,
+      [userId, limit, offset]
     );
 
     const b2Provider = require("./src/providers/b2");
