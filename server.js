@@ -3562,6 +3562,49 @@ app.post("/api/v1/chat/conversations/:id/seen", async (req, res) => {
 const smartFeedRouter = require("./src/routes/smart-feed");
 app.use("/api/v1", smartFeedRouter);
 
+
+/* [REELS-VIEWER-FIX] Lightweight per-post counts refresh */
+app.get("/api/v1/posts/:id/counts", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const postId = req.params.id;
+
+    const r = await query(
+      "SELECT " +
+      "(SELECT COUNT(*) FROM reactions WHERE post_id=$1) AS reaction_count, " +
+      "(SELECT COUNT(*) FROM comments WHERE post_id=$1 AND deleted_at IS NULL) AS comment_count, " +
+      "COALESCE(view_count, 0) AS view_count, " +
+      "(SELECT 1 FROM reactions WHERE post_id=$1 AND user_id=$2 LIMIT 1) AS viewer_reacted_int " +
+      "FROM posts WHERE id=$1 AND deleted_at IS NULL LIMIT 1",
+      [postId, userId]
+    );
+
+    if (!r.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+
+    const row = r.rows[0];
+    res.json({
+      success: true,
+      post_id: postId,
+      reaction_count: Number(row.reaction_count || 0),
+      comment_count: Number(row.comment_count || 0),
+      view_count: Number(row.view_count || 0),
+      viewer_has_reacted: Number(row.viewer_reacted_int) === 1
+    });
+  } catch (err) {
+    console.error("[POST-COUNTS]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
@@ -4393,7 +4436,8 @@ app.get("/api/v1/reels", async (req, res) => {
 
     const authHeader = req.headers.authorization || "";
     if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    try { jwt.verify(authHeader.slice(7), envLocal.jwt.secret); }
+    let userId = null;
+    try { const _p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = _p.sub; }
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
     const limit = Math.min(Number(req.query.limit || 10), 30);
@@ -4406,7 +4450,8 @@ app.get("/api/v1/reels", async (req, res) => {
               (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.type='video' AND m.deleted_at IS NULL LIMIT 1) AS media_url,
               'video' AS media_type,
               (SELECT COUNT(*) FROM reactions r WHERE r.post_id=p.id) AS reaction_count,
-              (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND c.deleted_at IS NULL) AS comment_count
+              (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND c.deleted_at IS NULL) AS comment_count,
+              (SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$3 LIMIT 1) AS viewer_reacted_int
        FROM posts p
        JOIN users u ON u.id = p.author_id
        WHERE p.deleted_at IS NULL
@@ -4414,7 +4459,7 @@ app.get("/api/v1/reels", async (req, res) => {
          AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='video' AND m.deleted_at IS NULL)
        ORDER BY p.created_at DESC
        LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      [limit, offset, userId]
     );
 
     const b2Provider = require("./src/providers/b2");
@@ -4431,7 +4476,8 @@ app.get("/api/v1/reels", async (req, res) => {
           console.error("[REELS-MEDIA-SIGN]", e.message);
         }
       }
-      return { ...row, media_url: mediaUrl };
+      const { viewer_reacted_int, ...rest } = row;
+      return { ...rest, media_url: mediaUrl, viewer_has_reacted: Number(viewer_reacted_int) === 1 };
     }));
 
     res.json({ success: true, posts: signedPosts, pagination: { limit, offset } });
