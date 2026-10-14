@@ -3558,6 +3558,10 @@ app.post("/api/v1/chat/conversations/:id/seen", async (req, res) => {
   }
 });
 
+/* [SMART-FEED-MOUNT] Additive — does not affect existing routes */
+const smartFeedRouter = require("./src/routes/smart-feed");
+app.use("/api/v1", smartFeedRouter);
+
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
