@@ -5324,7 +5324,7 @@ app.get("/api/v1/search", async (req, res) => {
       }
     }
 
-    res.json({ success: true, mode, users, videos, music });
+    res.json({ success: true, mode, query_used: query, users, videos, music, counts: { users: users.length, videos: videos.length } });
   } catch (err) {
     console.error("[SEARCH-ERROR]", err.message);
     res.json({ success: true, mode: "all", users: [], videos: [], music: [] });
