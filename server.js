@@ -1029,7 +1029,7 @@ app.get("/api/v1/posts/:id", async (req, res) => {
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
     const r = await query(
-      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, p.is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
       [req.params.id]
     );
     if (!r.rows.length) {
@@ -1200,7 +1200,7 @@ app.get("/api/v1/users/:id/stats", async (req, res) => {
     const followers = await query("SELECT COALESCE(display_followers, (SELECT COUNT(*) FROM follows WHERE following_id=u.id)) AS c FROM users u WHERE u.id=$1", [req.params.id]);
     const following = await query("SELECT COUNT(*) AS c FROM follows WHERE follower_id=$1", [req.params.id]);
     const posts = await query("SELECT COUNT(*) AS c FROM posts WHERE author_id=$1 AND deleted_at IS NULL", [req.params.id]);
-    const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1", [req.params.id]);
+    const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1 OR user_b_id=$1", [req.params.id]);
     res.json({
       success: true,
       stats: {
@@ -3804,7 +3804,7 @@ async function checkCriteria(userId, method) {
   const likes = await query("SELECT COUNT(*) AS c FROM reactions WHERE user_id=$1", [userId]);
   const comments = await query("SELECT COUNT(DISTINCT post_id) AS c FROM comments WHERE author_id=$1 AND deleted_at IS NULL", [userId]);
   const follows = await query("SELECT COUNT(*) AS c FROM follows WHERE follower_id=$1", [userId]);
-  const friends = await query("SELECT COUNT(*) AS c FROM friend_requests WHERE sender_id=$1", [userId]);
+  const friends = await query("SELECT COUNT(*) AS c FROM friendships WHERE user_a_id=$1 OR user_b_id=$1", [userId]);
 
   const adViews = await query("SELECT COUNT(*) AS c FROM ad_revenue_clicks WHERE visitor_id=$1", [userId]);
 
@@ -5404,6 +5404,46 @@ app.post("/api/v1/artist/upload", async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+/* [FIX-MISMATCH-ROUTES] */
+app.get('/api/v1/search/users', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(Number(req.query.limit || 20), 50);
+    if (!q) return res.json({ success: true, users: [] });
+    const r = await query("SELECT id, first_name, surname, username, bio, category, country, profile_photo_media_id FROM users WHERE account_status='active' AND deleted_at IS NULL AND (lower(username) LIKE lower($1) OR lower(first_name) LIKE lower($1) OR lower(surname) LIKE lower($1)) ORDER BY created_at DESC LIMIT $2", ['%' + q + '%', limit]);
+    res.json({ success: true, users: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.get('/api/v1/sounds/favorites', async (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const envLocal = require('./src/config/env');
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
+    let userId = null;
+    try { userId = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; }
+    catch (e) { return res.status(401).json({ success: false, error: 'INVALID_SESSION' }); }
+    const r = await query('SELECT s.* FROM sound_favorites f JOIN sounds s ON s.id = f.sound_id WHERE f.user_id=$1 LIMIT 100', [userId]);
+    res.json({ success: true, sounds: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+app.post('/api/v1/sounds/:id/favorite', async (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const envLocal = require('./src/config/env');
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ success: false, error: 'AUTH_REQUIRED' });
+    let userId = null;
+    try { userId = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; }
+    catch (e) { return res.status(401).json({ success: false, error: 'INVALID_SESSION' }); }
+    try { await query('INSERT INTO sound_favorites(user_id,sound_id) VALUES($1,$2)', [userId, req.params.id]); } catch (_) {}
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+/* [/FIX-MISMATCH-ROUTES] */
 
 app.use((err, req, res, next) => {
   console.error("[CONNECTO ERROR]", err);

@@ -849,6 +849,9 @@ router.post('/posts',auth,async(req,res,next)=>{
         for (const u of users.rows) {
           if (u.id === req.user.id) continue;
           try {
+            await query('INSERT INTO mentions(id,post_id,mentioned_user_id,mentioning_user_id) VALUES($1,$2,$3,$4)', [uuidv4(), post.id, u.id, req.user.id]);
+          } catch (mentionsErr) { console.error('[MENTIONS-INSERT]', mentionsErr.message); }
+          try {
             await notify({
               userId: u.id,
               actorId: req.user.id,
