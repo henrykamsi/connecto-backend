@@ -5475,6 +5475,74 @@ app.get('/api/v1/diag/upload', async (req, res) => {
 });
 /* [/DIAG-ENDPOINT] */
 
+/* [DIAG-PUT] */
+app.get('/api/v1/diag/put', async (req, res) => {
+  const https = require('https');
+  const http = require('http');
+  try {
+    const b2 = require('./src/providers/b2');
+    const key = 'users/diag/put-test-' + Date.now() + '.txt';
+    const body = 'hello from diag ' + new Date().toISOString();
+    const putUrl = await b2.upload
+      ? null
+      : null;
+    // Use the same signing path as [PATCH-C]: signB2Put
+    const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+    const creds = await b2.getB2Creds();
+    const s3 = new S3Client({
+      endpoint: creds.endpoint,
+      region: creds.region,
+      credentials: { accessKeyId: creds.keyId, secretAccessKey: creds.applicationKey },
+      forcePathStyle: true
+    });
+    const cmd = new PutObjectCommand({ Bucket: creds.bucket, Key: key, ContentType: 'text/plain' });
+    const signedUrl = await getSignedUrl(s3, cmd, { expiresIn: 300 });
+    // Actually PUT the small body to B2 using the signed URL
+    const result = await new Promise((resolve) => {
+      const urlObj = new URL(signedUrl);
+      const req2 = https.request({
+        method: 'PUT',
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        headers: { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(body) }
+      }, (r) => {
+        let data = '';
+        r.on('data', (c) => data += c);
+        r.on('end', () => resolve({ status: r.statusCode, body: data.slice(0, 500) }));
+      });
+      req2.on('error', (e) => resolve({ status: 'network-error', body: e.message }));
+      req2.write(body);
+      req2.end();
+    });
+    // Try to read back the file
+    let readback = null;
+    try {
+      const readUrl = await b2.signedDownload(key, 60);
+      const readResult = await new Promise((resolve) => {
+        const urlObj = new URL(readUrl);
+        https.get({ hostname: urlObj.hostname, path: urlObj.pathname + urlObj.search }, (r) => {
+          let data = '';
+          r.on('data', (c) => data += c);
+          r.on('end', () => resolve({ status: r.statusCode, body: data.slice(0, 200) }));
+        }).on('error', (e) => resolve({ status: 'err', body: e.message }));
+      });
+      readback = readResult;
+    } catch (e) {
+      readback = { error: e.message };
+    }
+    res.json({
+      success: true,
+      put: result,
+      readback: readback,
+      key: key
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message, stack: e.stack });
+  }
+});
+/* [/DIAG-PUT] */
+
 app.use((err, req, res, next) => {
   console.error("[CONNECTO ERROR]", err);
 
