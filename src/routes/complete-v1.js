@@ -40,7 +40,7 @@ router.get('/posts/:id/comments',auth,async(req,res)=>{
     const r = await query(
       `SELECT c.id, c.body, c.author_id, c.parent_comment_id, c.created_at,
               u.first_name, u.surname, u.username, u.profile_photo_media_id,
-              u.is_verified AS author_verified
+              CAST(u.is_verified AS INTEGER) AS author_verified
        FROM comments c
        JOIN users u ON u.id = c.author_id
        WHERE c.post_id=$1 AND c.deleted_at IS NULL
@@ -891,7 +891,7 @@ router.get('/users/:id/posts',auth,async(req,res,next)=>{
 
     const r = await query(
       `SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
-              u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified,
+              u.first_name, u.surname, u.username, u.profile_photo_media_id, CAST(u.is_verified AS INTEGER) AS author_verified,
               COALESCE(p.view_count, 0) AS view_count,
               (u.pinned_post_id = p.id) AS pinned,
               (SELECT m.storage_key FROM media m WHERE m.post_id=p.id AND m.deleted_at IS NULL ORDER BY m.created_at ASC LIMIT 1) AS media_key,
@@ -1108,7 +1108,7 @@ router.get('/feed',auth,async(req,res,next)=>{
 
     const sql =
       'SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, ' +
-      'u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified, ' +
+      'u.first_name, u.surname, u.username, u.profile_photo_media_id, CAST(u.is_verified AS INTEGER) AS author_verified, ' +
       'COALESCE(rc.reaction_count,0) reaction_count, ' +
       'COALESCE(cc.comment_count,0) comment_count, ' +
       '(SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=$1 LIMIT 1) AS viewer_reacted_int, ' +
@@ -1389,7 +1389,7 @@ router.get('/chat/conversations/:id/messages',auth,async(req,res,next)=>{
     }
 
     const result = await query(
-      `SELECT m.*,u.first_name,u.surname,u.username,u.profile_photo_media_id,u.is_verified AS author_verified
+      `SELECT m.*,u.first_name,u.surname,u.username,u.profile_photo_media_id,CAST(u.is_verified AS INTEGER) AS author_verified
        FROM messages m
        JOIN users u ON u.id=m.sender_id
        WHERE m.conversation_id=$1
@@ -2184,7 +2184,7 @@ router.get('/posts/:id/comments',auth,async(req,res)=>{
     const r = await query(
       `SELECT c.id, c.body, c.author_id, c.parent_comment_id, c.created_at,
               u.first_name, u.surname, u.username, u.profile_photo_media_id,
-              u.is_verified AS author_verified
+              CAST(u.is_verified AS INTEGER) AS author_verified
        FROM comments c
        JOIN users u ON u.id = c.author_id
        WHERE c.post_id=$1 AND c.deleted_at IS NULL
@@ -2203,7 +2203,7 @@ router.get('/me/bookmarks',auth,async(req,res)=>{
     const r = await query(
       `SELECT p.id, p.text, p.author_id, p.created_at,
               u.first_name, u.surname, u.username, u.profile_photo_media_id,
-              u.is_verified AS author_verified
+              CAST(u.is_verified AS INTEGER) AS author_verified
        FROM bookmarks b
        JOIN posts p ON p.id = b.post_id
        JOIN users u ON u.id = p.author_id

@@ -55,6 +55,7 @@ async function getB2Creds() {
   };
 }
 
+/* [ENV-FALLBACK] */
 function makeClient(creds) {
   return new S3Client({
     endpoint: creds.endpoint,
