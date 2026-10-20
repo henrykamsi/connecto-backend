@@ -31,12 +31,14 @@ router.get('/users/:id',auth,async(req,res)=>{
     if (!r.rows.length) return res.status(404).json({ success: false, error: "USER_NOT_FOUND" });
     res.json({ success: true, user: r.rows[0] });
   } catch (e) {
+    console.error('[COMMENTS-LOG] FAILED:', e.message, e.stack);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
 router.get('/posts/:id/comments',auth,async(req,res)=>{
   try {
+    console.log('[COMMENTS-LOG] fetching for post', req.params.id);
     const r = await query(
       `SELECT c.id, c.body, c.author_id, c.parent_comment_id, c.created_at,
               u.first_name, u.surname, u.username, u.profile_photo_media_id,
