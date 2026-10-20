@@ -101,9 +101,11 @@ app.use(cors({
 }));
 
 app.use(function logAllRequests(req, res, next) {
-  if (req.method !== "GET") return next();
   if (req.path.startsWith("/control-api")) return next();
-  console.log("[REQ]", req.method, req.path);
+  const start = Date.now();
+  res.on("finish", function() {
+    console.log("[REQ]", req.method, req.path, "->", res.statusCode, (Date.now()-start)+"ms");
+  });
   next();
 });
 
