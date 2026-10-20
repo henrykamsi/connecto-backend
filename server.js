@@ -1037,6 +1037,7 @@ app.get("/api/v1/posts/:id", async (req, res) => {
     if (!r.rows.length) {
       return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
     }
+    console.log("[REAL-POST-DUMP]", JSON.stringify({ keys: Object.keys(r.rows[0]), sample: r.rows[0] }));
     res.json({ success: true, post: r.rows[0] });
   } catch (err) {
     console.error("[POST-DETAIL]", err);
