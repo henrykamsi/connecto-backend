@@ -1666,13 +1666,14 @@ async function uploadToImgBB(cred, base64, name) {
 }
 
 async function signB2Put(cred, key, contentType) {
+  /* [B2-PUT-RELAX] Don't bind Content-Type or Content-Length into the signature.
+     This lets the client send any bytes without a SignatureDoesNotMatch error. */
   const s3 = makeB2Client(cred);
   const cmd = new PutObjectCommand({
     Bucket: cred.bucket,
-    Key: key,
-    ContentType: contentType
+    Key: key
   });
-  const url = await getSignedUrl(s3, cmd, { expiresIn: 900 });
+  const url = await getSignedUrl(s3, cmd, { expiresIn: 900, signableHeaders: new Set() });
   return url;
 }
 
