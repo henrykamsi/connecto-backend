@@ -5544,6 +5544,19 @@ app.get('/api/v1/diag/put', async (req, res) => {
 });
 /* [/DIAG-PUT] */
 
+/* [DIAG-POST] */
+app.get('/api/v1/diag/post/:id', async (req, res) => {
+  try {
+    const r = await query("SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, p.is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 LIMIT 1", [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
+    const row = r.rows[0];
+    const types = {};
+    for (const k of Object.keys(row)) types[k] = row[k] === null ? 'null' : typeof row[k];
+    res.json({ success: true, row, types });
+  } catch (e) { res.status(500).json({ success: false, error: e.message, stack: e.stack }); }
+});
+/* [/DIAG-POST] */
+
 app.use((err, req, res, next) => {
   console.error("[CONNECTO ERROR]", err);
 
