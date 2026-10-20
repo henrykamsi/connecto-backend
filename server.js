@@ -5445,6 +5445,36 @@ app.post('/api/v1/sounds/:id/favorite', async (req, res) => {
 });
 /* [/FIX-MISMATCH-ROUTES] */
 
+/* [DIAG-ENDPOINT] Safe diagnostic — no secrets */
+app.get('/api/v1/diag/upload', async (req, res) => {
+  try {
+    const b2 = require('./src/providers/b2');
+    const creds = await b2.getB2Creds();
+    const out = {
+      endpoint_set: !!creds.endpoint,
+      endpoint: creds.endpoint || null,
+      region: creds.region || null,
+      bucket: creds.bucket || null,
+      key_present: !!creds.keyId,
+      secret_present: !!creds.applicationKey,
+      control_key_set: !!process.env.CONTROL_ENCRYPTION_KEY
+    };
+    try {
+      const testKey = 'users/diag/test-' + Date.now() + '.txt';
+      const signedUrl = await b2.signedDownload(testKey, 60);
+      out.signed_url_prefix = signedUrl.split('?')[0];
+      out.signed_url_ok = true;
+    } catch (e) {
+      out.signed_url_ok = false;
+      out.signed_url_error = e.message;
+    }
+    res.json({ success: true, diag: out });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+/* [/DIAG-ENDPOINT] */
+
 app.use((err, req, res, next) => {
   console.error("[CONNECTO ERROR]", err);
 
