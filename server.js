@@ -5133,8 +5133,8 @@ app.get("/api/v1/search", async (req, res) => {
         gender: u.gender,
         profile_photo_media_id: u.profile_photo_media_id,
         cover_photo_media_id: u.cover_photo_media_id,
-        is_verified: Number(u.is_verified) === 1,
-        is_owner: Number(u.is_owner) === 1,
+        is_verified: Number(u.is_verified) === 1 ? 1 : 0,
+        is_owner: Number(u.is_owner) === 1 ? 1 : 0,
         followers_count: Number(u.followers_count || 0)
       }));
     }
@@ -5202,7 +5202,7 @@ app.get("/api/v1/search", async (req, res) => {
           surname: row.surname,
           username: row.username,
           profile_photo_media_id: row.profile_photo_media_id,
-          author_verified: Number(row.author_verified) === 1,
+          author_verified: Number(row.author_verified) === 1 ? 1 : 0,
           media_url: mediaUrl,
           media_type: "video",
           reaction_count: Number(row.reaction_count || 0),
