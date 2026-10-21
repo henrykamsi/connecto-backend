@@ -4,6 +4,7 @@ const { query, run } = require("../db");
 const jwt = require("jsonwebtoken");
 const env = require("../config/env");
 const { v4: uuidv4 } = require("uuid");
+const squad = require("../providers/squad");
 
 function auth(req, res, next) {
   try {
@@ -15,53 +16,69 @@ function auth(req, res, next) {
   } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 }
 
-// List active shop items
 router.get("/items", async (req, res) => {
-  try {
-    // For now, return static list. Later can be from DB.
-    res.json({
-      success: true,
-      items: [
-        { id: "glow", name: "Animated Profile Glow", price_1w: 300, price_1m: 1000, price_1y: 4500, ad_unlock: "1 Day" },
-        { id: "boost", name: "Boost Boost (Post)", price_1d: 1500, ad_unlock: null },
-        { id: "analytics", name: "Profile Visitors", price_1m: 1100, price_5m: 3600, price_1y: 5500, ad_unlock: "4 Ads for 30 Viewers" },
-        { id: "paid_check", name: "Paid Blue Checkmark", price_1m: 3500, price_1y: 15500, ad_unlock: null },
-        { id: "org", name: "Create Organization", price_1m: 6500, price_1y: 25500, ad_unlock: null }
-      ]
-    });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+  res.json({
+    success: true,
+    items: [
+      { id: "glow", name: "Animated Profile Glow", price_1w: 300, price_1m: 1000, price_1y: 4500, ad_unlock: "1 Day" },
+      { id: "boost", name: "Boost Boost (Post)", price_1d: 1500 },
+      { id: "analytics", name: "Profile Visitors", price_1m: 1100, price_5m: 3600, price_1y: 5500, ad_unlock: "4 Ads for 30 Viewers" },
+      { id: "paid_check", name: "Paid Blue Checkmark", price_1m: 3500, price_1y: 15500 },
+      { id: "org", name: "Create Organization", price_1m: 6500, price_1y: 25500 }
+    ]
+  });
 });
 
-// Purchase an item
 router.post("/purchase", auth, async (req, res) => {
   try {
     const { itemId, duration } = req.body;
     if (!itemId || !duration) return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
 
-    // In a real app, you would call Squad API here to generate a checkout URL.
-    // For now, we simulate a successful purchase and log it.
-    const expiresAt = new Date();
-    if (duration === "1d") expiresAt.setDate(expiresAt.getDate() + 1);
-    else if (duration === "1w") expiresAt.setDate(expiresAt.getDate() + 7);
-    else if (duration === "1m") expiresAt.setMonth(expiresAt.getMonth() + 1);
-    else if (duration === "5m") expiresAt.setMonth(expiresAt.getMonth() + 5);
-    else if (duration === "1y") expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+    const prices = {
+      glow: { "1w": 300, "1m": 1000, "1y": 4500 },
+      boost: { "1d": 1500 },
+      analytics: { "1m": 1100, "5m": 3600, "1y": 5500 },
+      paid_check: { "1m": 3500, "1y": 15500 },
+      org: { "1m": 6500, "1y": 25500 }
+    };
 
-    await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,$4,$5)", 
-      [uuidv4(), req.userId, itemId, duration, expiresAt.toISOString()]);
+    const amount = prices[itemId]?.[duration];
+    if (!amount) return res.status(400).json({ success: false, error: "INVALID_PRICING" });
 
-    res.json({ success: true, message: "Purchase successful (Simulated)", checkout_url: null });
+    // Get user email for Squad
+    const u = await query("SELECT email FROM users WHERE id=$1", [req.userId]);
+    const email = u.rows[0]?.email || "user@connecto.app";
+    const reference = `connecto-${itemId}-${uuidv4()}`;
+
+    let checkoutUrl = null;
+    try {
+      checkoutUrl = await squad.initTransaction({
+        email: email,
+        amountKobo: amount * 100,
+        reference: reference,
+        callbackUrl: "connecto://payment-return?ref=" + reference
+      });
+    } catch (e) {
+      console.error("[SHOP-SQUAD]", e.message);
+    }
+
+    await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at, reference) VALUES ($1,$2,$3,$4,$5,$6)",
+      [uuidv4(), req.userId, itemId, duration, new Date().toISOString(), reference]);
+
+    res.json({ success: true, checkout_url: checkoutUrl, reference });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-// Unlock via Ads
 router.post("/ad-unlock", auth, async (req, res) => {
   try {
     const { itemId } = req.body;
     if (itemId === "analytics") {
-      // Logic for 4 ads -> 30 viewers limit goes here
+      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',datetime('now','+1 hour'))",
+        [uuidv4(), req.userId, "analytics_ad"]);
       res.json({ success: true, message: "Ad unlock active: Max 30 viewers." });
     } else if (itemId === "glow") {
+      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',datetime('now','+1 day'))",
+        [uuidv4(), req.userId, "glow"]);
       res.json({ success: true, message: "Glow unlocked for 1 Day." });
     } else {
       res.status(400).json({ success: false, error: "NOT_AVAILABLE_VIA_AD" });
