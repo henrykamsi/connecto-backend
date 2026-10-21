@@ -3701,6 +3701,16 @@ app.get("/api/v1/posts/:id/counts", async (req, res) => {
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);
 
+/* [SHOP-ROUTES] */
+const shopRouter = require('./src/routes/shop');
+const analyticsRouter = require('./src/routes/analytics');
+app.use('/api/v1/shop', shopRouter);
+app.use('/api/v1/analytics', analyticsRouter);
+
+const { startCronJobs } = require('./src/services/cron');
+startCronJobs();
+
+
 /* [USER-MONETIZATION-ENDPOINT] Public view of a user's monetization config */
 app.get("/api/v1/users/:id/monetization", async (req, res) => {
   try {
