@@ -68,7 +68,7 @@ router.post("/posts/:id/tag-category", auth, async (req, res) => {
 
 // SQL builder that matches complete-v1.js schema (media joined via media table)
 const POST_COLS = "p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.share_enabled, p.created_at, " +
-  "p.category, u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified, " +
+  "p.category, p.is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, u.is_verified AS author_verified, " +
   "(SELECT COUNT(*) FROM reactions r WHERE r.post_id=p.id) AS reaction_count, " +
   "(SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND c.deleted_at IS NULL) AS comment_count, " +
   "COALESCE(p.view_count, 0) AS view_count, " +

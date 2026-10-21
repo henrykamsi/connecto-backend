@@ -149,6 +149,31 @@ app.use((req, res, next) => {
   } catch(e) { console.error("[ADVANCED-SETTINGS]", e.message); }
 })();
 
+
+/* [AI-BULLETPROOF] */
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/api/v1/posts') {
+    const originalJson = res.json.bind(res);
+    res.json = async function(body) {
+      if (body && body.success && body.post && body.post.id) {
+        console.log("[AI-BULLETPROOF] Post created:", body.post.id);
+        console.log("[AI-BULLETPROOF] req.body.is_ai_content:", req.body.is_ai_content);
+        try {
+          const { run } = require("./src/db");
+          const val = (req.body.is_ai_content === true || req.body.is_ai_content === 1 || req.body.is_ai_content === '1') ? 1 : 0;
+          await run("UPDATE posts SET is_ai_content=$1 WHERE id=$2", [val, body.post.id]);
+          console.log("[AI-BULLETPROOF] DB updated is_ai_content to:", val);
+          body.post.is_ai_content = val === 1; // Force response to be true/false
+        } catch (e) {
+          console.error("[AI-BULLETPROOF] DB ERROR:", e.message);
+        }
+      }
+      return originalJson(body);
+    };
+  }
+  next();
+});
+
 app.use(express.json({ limit: "10mb" }));
 
 /* [GLOBAL-AI-BOOLEAN-FIX] */
