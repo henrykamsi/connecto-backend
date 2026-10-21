@@ -872,6 +872,13 @@ router.post('/posts',auth,async(req,res,next)=>{
       console.error('[POST-MENTION]', e.message);
     }
 
+    /* [FINAL-AI-FIX] */
+    if (post) {
+      post.is_ai_content = post.is_ai_content === 1 || post.is_ai_content === '1' || post.is_ai_content === true;
+      post.comments_enabled = post.comments_enabled === 1 || post.comments_enabled === '1' || post.comments_enabled === true;
+      post.share_enabled = post.share_enabled === 1 || post.share_enabled === '1' || post.share_enabled === true;
+    }
+
     res.status(201).json({
       success:true,
       post
