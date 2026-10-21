@@ -818,8 +818,8 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
 router.post('/posts',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled)
-       VALUES($1,$2,$3,$4,$5,$6)
+      `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled,privacy,boost_boost,is_ai_content)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, author_id, text, audience, comments_enabled, share_enabled, created_at, deleted_at, (CASE WHEN is_ai_content = 1 THEN true ELSE false END) AS is_ai_content`,
       [
         uuidv4(),
@@ -827,7 +827,10 @@ router.post('/posts',auth,async(req,res,next)=>{
         req.body.body || null,
         req.body.visibility || 'public',
         req.body.commentsEnabled !== false,
-        req.body.shareEnabled !== false
+        req.body.shareEnabled !== false,
+        req.body.privacy || 'public',
+        req.body.boost_boost ? 1 : 0,
+        req.body.is_ai_content ? 1 : 0
       ]
     );
 
