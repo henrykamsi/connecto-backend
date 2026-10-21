@@ -820,7 +820,7 @@ router.post('/posts',auth,async(req,res,next)=>{
     const result = await query(
       `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled)
        VALUES($1,$2,$3,$4,$5,$6)
-       RETURNING *`,
+       RETURNING id, author_id, text, audience, comments_enabled, share_enabled, created_at, deleted_at, (CASE WHEN is_ai_content = 1 THEN true ELSE false END) AS is_ai_content`,
       [
         uuidv4(),
         req.user.id,

@@ -1031,7 +1031,7 @@ app.get("/api/v1/posts/:id", async (req, res) => {
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
     const r = await query(
-      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, (CASE WHEN p.is_ai_content = 1 THEN 1 ELSE 0 END) = 1 AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, (CASE WHEN p.is_ai_content = 1 THEN true ELSE false END) AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
       [req.params.id]
     );
     if (!r.rows.length) {
@@ -2738,7 +2738,13 @@ app.post("/api/v1/organizations/:id/post", async (req, res) => {
 
     res.status(201).json({
       success: true,
-      post_id: postId,
+      post: {
+        id: postId,
+        text: text,
+        is_ai_content: false,
+        comments_enabled: true,
+        share_enabled: true
+      },
       organization: org.rows[0] || null,
       posted_by: userId,
       attribution: "organization",
@@ -3696,6 +3702,26 @@ app.get("/api/v1/posts/:id/counts", async (req, res) => {
     console.error("[POST-COUNTS]", err);
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+
+/* [AI-BOOLEAN-FIX] Force is_ai_content to boolean for Android */
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body) {
+      if (body.post && body.post.is_ai_content !== undefined) {
+        body.post.is_ai_content = Boolean(body.post.is_ai_content);
+      }
+      if (body.posts && Array.isArray(body.posts)) {
+        body.posts.forEach(p => {
+          if (p.is_ai_content !== undefined) p.is_ai_content = Boolean(p.is_ai_content);
+        });
+      }
+    }
+    return originalJson(body);
+  };
+  next();
 });
 
 app.use("/api/v1", v1);
