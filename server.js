@@ -1031,7 +1031,7 @@ app.get("/api/v1/posts/:id", async (req, res) => {
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
     const r = await query(
-      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, CAST(CAST(p.is_ai_content AS BOOLEAN) AS is_ai_content AS BOOLEAN) AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
+      "SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, (CASE WHEN p.is_ai_content = 1 THEN 1 ELSE 0 END) = 1 AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 AND p.deleted_at IS NULL LIMIT 1",
       [req.params.id]
     );
     if (!r.rows.length) {
@@ -5560,7 +5560,7 @@ app.get('/api/v1/diag/put', async (req, res) => {
 /* [DIAG-POST] */
 app.get('/api/v1/diag/post/:id', async (req, res) => {
   try {
-    const r = await query("SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, CAST(CAST(p.is_ai_content AS BOOLEAN) AS is_ai_content AS BOOLEAN) AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 LIMIT 1", [req.params.id]);
+    const r = await query("SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, (CASE WHEN p.is_ai_content = 1 THEN 1 ELSE 0 END) = 1 AS is_ai_content, u.first_name, u.surname, u.username, u.profile_photo_media_id, (SELECT COUNT(*) FROM reactions WHERE post_id=p.id) AS reaction_count, (SELECT COUNT(*) FROM comments WHERE post_id=p.id AND deleted_at IS NULL) AS comment_count FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 LIMIT 1", [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ success: false, error: 'NOT_FOUND' });
     const row = r.rows[0];
     const types = {};
