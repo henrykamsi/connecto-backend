@@ -109,6 +109,46 @@ app.use(function logAllRequests(req, res, next) {
   next();
 });
 
+
+/* [ADVANCED-SETTINGS-SAFE] Intercept POST /posts to save AI, privacy, and boost */
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/api/v1/posts') {
+    const originalJson = res.json.bind(res);
+    res.json = async function(body) {
+      if (body && body.success && body.post && body.post.id) {
+        try {
+          const { run } = require("./src/db");
+          await run(
+            "UPDATE posts SET is_ai_content=$1, privacy=$2, boost_boost=$3 WHERE id=$4",
+            [
+              req.body.is_ai_content ? 1 : 0,
+              req.body.privacy || 'public',
+              req.body.boost_boost ? 1 : 0,
+              body.post.id
+            ]
+          );
+          body.post.is_ai_content = Boolean(req.body.is_ai_content);
+        } catch (e) {
+          console.error("[ADVANCED-SETTINGS-SAFE]", e.message);
+        }
+      }
+      return originalJson(body);
+    };
+  }
+  next();
+});
+
+/* [ADVANCED-SETTINGS-SAFE] Ensure columns exist */
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    try { await run("ALTER TABLE posts ADD COLUMN privacy TEXT DEFAULT 'public'"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN boost_boost INTEGER DEFAULT 0"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN is_ai_content INTEGER DEFAULT 0"); } catch(e){}
+    console.log("[ADVANCED-SETTINGS] DB columns ready.");
+  } catch(e) { console.error("[ADVANCED-SETTINGS]", e.message); }
+})();
+
 app.use(express.json({ limit: "10mb" }));
 
 /* [GLOBAL-AI-BOOLEAN-FIX] */
