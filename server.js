@@ -110,6 +110,36 @@ app.use(function logAllRequests(req, res, next) {
 });
 
 app.use(express.json({ limit: "10mb" }));
+
+/* [GLOBAL-AI-BOOLEAN-FIX] */
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body) {
+      // 1. Check if a single post is returned
+      if (body.post && typeof body.post === 'object') {
+        if (body.post.is_ai_content !== undefined) {
+          body.post.is_ai_content = Boolean(Number(body.post.is_ai_content));
+        }
+      }
+      // 2. Check if an array of posts is returned
+      if (body.posts && Array.isArray(body.posts)) {
+        body.posts.forEach(p => {
+          if (p.is_ai_content !== undefined) {
+            p.is_ai_content = Boolean(Number(p.is_ai_content));
+          }
+        });
+      }
+      // 3. Check if the post is returned at the root level (no "post" wrapper)
+      if (body.is_ai_content !== undefined && body.id !== undefined) {
+         body.is_ai_content = Boolean(Number(body.is_ai_content));
+      }
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
 app.use(express.urlencoded({
   extended: true,
   limit: "10mb"
