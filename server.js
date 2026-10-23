@@ -190,6 +190,17 @@ app.use((req, res, next) => {
   next();
 });
 
+
+/* [STORIES-AND-PINS] */
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    await run("CREATE TABLE IF NOT EXISTS stories (id TEXT PRIMARY KEY, user_id TEXT, media_url TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+    await run("CREATE TABLE IF NOT EXISTS pinned_posts (id TEXT PRIMARY KEY, user_id TEXT, post_id TEXT, pinned_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, post_id))");
+    console.log("[STORIES-AND-PINS] Tables ready.");
+  } catch(e) { console.error(e.message); }
+})();
+
 app.use(express.json({ limit: "10mb" }));
 
 /* [GLOBAL-AI-BOOLEAN-FIX] */
