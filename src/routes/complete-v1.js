@@ -2242,4 +2242,44 @@ router.get('/me/bookmarks',auth,async(req,res)=>{
   }
 });
 
+
+/* [REPOST-ENDPOINTS] */
+router.post('/posts/:id/repost-to-profile', auth, async (req, res, next) => {
+  try {
+    const originalId = req.params.id;
+    const original = await query("SELECT id FROM posts WHERE id=$1 AND deleted_at IS NULL LIMIT 1", [originalId]);
+    if (!original.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+
+    const existing = await query("SELECT id FROM posts WHERE original_post_id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [originalId, req.user.id]);
+    if (existing.rows.length) return res.json({ success: true, post_id: existing.rows[0].id, alreadyReposted: true });
+
+    const newId = uuidv4();
+    await query(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, original_post_id) VALUES ($1,$2,NULL,'public',1,1,$3)",
+      [newId, req.user.id, originalId]
+    );
+
+    res.status(201).json({ success: true, post_id: newId, is_repost: true });
+  } catch (err) { next(err); }
+});
+
+router.post('/posts/:id/repost-to-reels', auth, async (req, res, next) => {
+  try {
+    const originalId = req.params.id;
+    const original = await query("SELECT id FROM posts WHERE id=$1 AND deleted_at IS NULL LIMIT 1", [originalId]);
+    if (!original.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND" });
+
+    const existing = await query("SELECT id FROM posts WHERE original_post_id=$1 AND author_id=$2 AND deleted_at IS NULL LIMIT 1", [originalId, req.user.id]);
+    if (existing.rows.length) return res.json({ success: true, post_id: existing.rows[0].id, alreadyReposted: true });
+
+    const newId = uuidv4();
+    await query(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, original_post_id) VALUES ($1,$2,NULL,'reels',1,1,$3)",
+      [newId, req.user.id, originalId]
+    );
+
+    res.status(201).json({ success: true, post_id: newId, is_repost: true });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

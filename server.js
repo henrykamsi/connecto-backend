@@ -174,6 +174,22 @@ app.use((req, res, next) => {
   next();
 });
 
+
+/* [REPOST-FIX] */
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body) {
+      if (body.post && body.post.id) {
+        // If this is a repost, ensure the boolean flag is sent
+        body.post.is_repost = Boolean(body.post.original_post_id);
+      }
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
 app.use(express.json({ limit: "10mb" }));
 
 /* [GLOBAL-AI-BOOLEAN-FIX] */
