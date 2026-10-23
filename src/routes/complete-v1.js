@@ -1,3 +1,14 @@
+
+/* [SCHEDULE-FIX] */
+(async () => {
+  try {
+    const { run } = require('../db');
+    try { await run("ALTER TABLE posts ADD COLUMN scheduled_at TEXT"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN status TEXT DEFAULT 'published'"); } catch(e){}
+    console.log("[SCHEDULE] DB columns ready.");
+  } catch(e) { console.error("[SCHEDULE]", e.message); }
+})();
+
 const { v4: uuidv4 } = require('uuid');
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -818,8 +829,8 @@ router.post('/social/friend-request/:id/accept',auth,async(req,res,next)=>{
 router.post('/posts',auth,async(req,res,next)=>{
   try {
     const result = await query(
-      `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled,privacy,boost_boost,is_ai_content)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO posts(id,author_id,text,audience,comments_enabled,share_enabled,privacy,boost_boost,is_ai_content, scheduled_at, status)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING id, author_id, text, audience, comments_enabled, share_enabled, created_at, deleted_at, (CASE WHEN is_ai_content = 1 THEN true ELSE false END) AS is_ai_content`,
       [
         uuidv4(),
@@ -830,7 +841,9 @@ router.post('/posts',auth,async(req,res,next)=>{
         req.body.shareEnabled !== false,
         req.body.privacy || 'public',
         req.body.boost_boost ? 1 : 0,
-        req.body.is_ai_content ? 1 : 0
+        req.body.is_ai_content ? 1 : 0,
+        req.body.scheduledTime || null,
+        req.body.scheduledTime ? 'scheduled' : 'published'
       ]
     );
 
@@ -1130,7 +1143,7 @@ router.get('/feed',auth,async(req,res,next)=>{
       'JOIN users u ON u.id=p.author_id ' +
       'LEFT JOIN ( SELECT post_id,COUNT(*) reaction_count FROM reactions GROUP BY post_id ) rc ON rc.post_id=p.id ' +
       'LEFT JOIN ( SELECT post_id,COUNT(*) comment_count FROM comments WHERE deleted_at IS NULL GROUP BY post_id ) cc ON cc.post_id=p.id ' +
-      'WHERE p.deleted_at IS NULL ' +
+      'WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \"published\") ' +
       'AND u.account_status=\'active\' ' +
       'AND p.author_id != $1 ' +
       'AND ( p.audience=\'public\' ' +
