@@ -1143,7 +1143,7 @@ router.get('/feed',auth,async(req,res,next)=>{
       'JOIN users u ON u.id=p.author_id ' +
       'LEFT JOIN ( SELECT post_id,COUNT(*) reaction_count FROM reactions GROUP BY post_id ) rc ON rc.post_id=p.id ' +
       'LEFT JOIN ( SELECT post_id,COUNT(*) comment_count FROM comments WHERE deleted_at IS NULL GROUP BY post_id ) cc ON cc.post_id=p.id ' +
-      'WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \"published\") ' +
+      'WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \x27published\x27) ' +
       'AND u.account_status=\'active\' ' +
       'AND p.author_id != $1 ' +
       'AND ( p.audience=\'public\' ' +
@@ -1363,7 +1363,7 @@ router.post('/chat/conversations',auth,async(req,res,next)=>{
     const id = conversation.rows[0].id;
 
     await query(
-      `INSERT INTO conversation_members (conversation_id, user_id) VALUES ($1, $2), ($1, $3)`,
+      `INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1, $4, $2), ($5, $4, $3)`,
       [id,req.user.id,otherUserId]
     );
 

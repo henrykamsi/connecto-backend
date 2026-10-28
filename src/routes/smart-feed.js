@@ -154,17 +154,17 @@ router.get("/feed/smart", auth, async (req, res) => {
     async function readFollowing(excludeIds) {
       if (!followingIds.length) return [];
       const ph = followingIds.map((_, i) => "$" + (i + 1)).join(",");
-      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \"published\") AND p.author_id IN (" + ph + ") ORDER BY p.created_at DESC LIMIT 200", followingIds);
+      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \x27published\x27) AND p.author_id IN (" + ph + ") ORDER BY p.created_at DESC LIMIT 200", followingIds);
       return r.rows.filter(x => !excludeIds.has(x.id));
     }
     async function readInterest(excludeIds) {
       if (!interests.length) return [];
       const ph = interests.map((_, i) => "$" + (i + 2)).join(",");
-      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \"published\") AND p.category IN (" + ph + ") AND p.author_id <> $1 ORDER BY p.created_at DESC LIMIT 200", [req.userId, ...interests]);
+      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \x27published\x27) AND p.category IN (" + ph + ") AND p.author_id <> $1 ORDER BY p.created_at DESC LIMIT 200", [req.userId, ...interests]);
       return r.rows.filter(x => !excludeIds.has(x.id) && !followingSet.has(x.author_id));
     }
     async function readRandom(excludeIds) {
-      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \"published\") AND p.author_id <> $1 ORDER BY p.created_at DESC LIMIT 200", [req.userId]);
+      const r = await query("SELECT " + POST_COLS + " FROM posts p JOIN users u ON u.id=p.author_id WHERE p.deleted_at IS NULL AND (p.status IS NULL OR p.status = \x27published\x27) AND p.author_id <> $1 ORDER BY p.created_at DESC LIMIT 200", [req.userId]);
       return r.rows.filter(x => !excludeIds.has(x.id) && !followingSet.has(x.author_id) && (!x.category || !interests.includes(x.category)));
     }
 
