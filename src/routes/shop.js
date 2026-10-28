@@ -45,10 +45,9 @@ router.post("/purchase", auth, async (req, res) => {
     const amount = prices[itemId]?.[duration];
     if (!amount) return res.status(400).json({ success: false, error: "INVALID_PRICING" });
 
-    // Get user email for Squad
     const u = await query("SELECT email FROM users WHERE id=$1", [req.userId]);
     const email = u.rows[0]?.email || "user@connecto.app";
-    const reference = `connecto-${itemId}-${uuidv4()}`;
+    const reference = "connecto-" + itemId + "-" + uuidv4();
 
     let checkoutUrl = null;
     try {
@@ -62,23 +61,29 @@ router.post("/purchase", auth, async (req, res) => {
       console.error("[SHOP-SQUAD]", e.message);
     }
 
-    await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at, reference) VALUES ($1,$2,$3,$4,$5,$6)",
-      [uuidv4(), req.userId, itemId, duration, new Date().toISOString(), reference]);
+    // Save a PENDING purchase
+    await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, reference) VALUES ($1,$2,$3,$4,$5)",
+      [uuidv4(), req.userId, itemId, duration, reference]);
 
     res.json({ success: true, checkout_url: checkoutUrl, reference });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// AD UNLOCK FIX: Actually grants the feature
 router.post("/ad-unlock", auth, async (req, res) => {
   try {
     const { itemId } = req.body;
+    const now = new Date();
+    
     if (itemId === "analytics") {
-      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',datetime('now','+1 hour'))",
-        [uuidv4(), req.userId, "analytics_ad"]);
-      res.json({ success: true, message: "Ad unlock active: Max 30 viewers." });
+      const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 1 Day
+      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',$4)",
+        [uuidv4(), req.userId, "analytics_ad", expires]);
+      res.json({ success: true, message: "Ad unlock active: Max 30 viewers for 24 hours." });
     } else if (itemId === "glow") {
-      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',datetime('now','+1 day'))",
-        [uuidv4(), req.userId, "glow"]);
+      const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(); // 1 Day
+      await run("INSERT INTO shop_purchases (id, user_id, item_id, duration, expires_at) VALUES ($1,$2,$3,'ad',$4)",
+        [uuidv4(), req.userId, "glow_ad", expires]);
       res.json({ success: true, message: "Glow unlocked for 1 Day." });
     } else {
       res.status(400).json({ success: false, error: "NOT_AVAILABLE_VIA_AD" });
