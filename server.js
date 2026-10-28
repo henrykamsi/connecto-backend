@@ -203,6 +203,51 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+/* [MULTI-MEDIA-API] */
+app.use(async (req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = async function(body) {
+    if (body && body.posts && Array.isArray(body.posts) && body.posts.length > 0) {
+      try {
+        const { query } = require("./src/db");
+        const b2 = require("./src/providers/b2");
+        const postIds = body.posts.map(p => p.id);
+        
+        if (postIds.length > 0) {
+          const placeholders = postIds.map((_, i) => "$" + (i + 1)).join(",");
+          const mediaResult = await query(
+            "SELECT post_id, storage_key, type FROM media WHERE post_id IN (" + placeholders + ") AND deleted_at IS NULL",
+            postIds
+          );
+          
+          const mediaMap = {};
+          for (const m of mediaResult.rows) {
+            if (!mediaMap[m.post_id]) mediaMap[m.post_id] = [];
+            let url = m.storage_key;
+            if (url && String(url).indexOf("http") !== 0) {
+              try { url = await b2.signedDownload(url, 3600); } catch (e) {}
+            }
+            mediaMap[m.post_id].push({ url: url, type: m.type });
+          }
+          
+          body.posts.forEach(p => {
+            p.media = mediaMap[p.id] || [];
+            if (p.media.length > 0) {
+              p.media_url = p.media[0].url;
+              p.media_type = p.media[0].type;
+            }
+          });
+        }
+      } catch (e) {
+        console.error("[MULTI-MEDIA-API] Error:", e.message);
+      }
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+
 /* [BOOL-FIX-PROFILE] Convert integer 0/1 to real boolean for Android PostDto */
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
