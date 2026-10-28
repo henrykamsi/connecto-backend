@@ -203,6 +203,34 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+/* [GLOW-CHECK] */
+app.use(async (req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = async function(body) {
+    if (body && body.user && body.user.id) {
+      try {
+        const { query } = require("./src/db");
+        const glow = await query("SELECT 1 FROM shop_purchases WHERE user_id=$1 AND item_id IN ('glow', 'glow_ad') AND expires_at > CURRENT_TIMESTAMP LIMIT 1", [body.user.id]);
+        body.user.has_glow = glow.rows.length > 0;
+      } catch (e) { }
+    }
+    if (body && body.posts) {
+      for (const p of body.posts) {
+        if (p.author_id) {
+          try {
+            const { query } = require("./src/db");
+            const glow = await query("SELECT 1 FROM shop_purchases WHERE user_id=$1 AND item_id IN ('glow', 'glow_ad') AND expires_at > CURRENT_TIMESTAMP LIMIT 1", [p.author_id]);
+            p.author_has_glow = glow.rows.length > 0;
+          } catch (e) { }
+        }
+      }
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+
 /* [AD-SYSTEM-FIX] */
 
 // 1. Create the Ads Table if it doesn't exist
