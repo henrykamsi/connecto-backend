@@ -326,7 +326,7 @@ app.use(async (req, res, next) => {
           const { query, run } = require("./src/db");
           
           // Find an active ad with remaining impressions
-          const ad = await query("SELECT * FROM user_ads WHERE is_active=1 AND current_impressions < target_impressions ORDER BY RANDOM() LIMIT 1");
+          const ad = await query("SELECT * FROM user_ads WHERE is_active=1 AND current_impressions < target_impressions LIMIT 1");
           
           if (ad.rows.length > 0) {
             const activeAd = ad.rows[0];
@@ -334,6 +334,7 @@ app.use(async (req, res, next) => {
             const post = await query("SELECT p.*, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1", [activeAd.post_id]);
             
             if (post.rows.length > 0) {
+              if (!post.rows.length) { console.log("[AD-INJECT] Post not found"); return originalJson(body); }
               const adPost = post.rows[0];
               adPost.is_ad = true;
               adPost.ad_link = activeAd.link;
