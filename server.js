@@ -203,6 +203,33 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+/* [MEDIA-ATTACH-FIX] */
+// This forces the media to attach to the post immediately upon creation
+app.use(async (req, res, next) => {
+  if (req.method === "POST" && req.path === "/api/v1/posts") {
+    const originalJson = res.json.bind(res);
+    res.json = async function(body) {
+      if (body && body.success && body.post && body.post.id) {
+        try {
+          const { run } = require("./src/db");
+          // Find any pending media for this user and attach it to this post
+          await run(
+            "UPDATE media SET post_id=$1, processing_status='ready', visibility='public' WHERE owner_id=$2 AND post_id IS NULL AND processing_status='pending'",
+            [body.post.id, req.user.id]
+          );
+          console.log("[MEDIA-ATTACH] Attached pending media to post:", body.post.id);
+        } catch (e) {
+          console.error("[MEDIA-ATTACH] Error:", e.message);
+        }
+      }
+      return originalJson(body);
+    };
+  }
+  next();
+});
+
+
+
 /* [GLOBAL-AI-BOOLEAN-FIX] */
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
