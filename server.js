@@ -203,6 +203,31 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+/* [BOOL-FIX-PROFILE] Convert integer 0/1 to real boolean for Android PostDto */
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body && body.posts && Array.isArray(body.posts)) {
+      body.posts.forEach(p => {
+        if (p.comments_enabled !== undefined) p.comments_enabled = Boolean(Number(p.comments_enabled));
+        if (p.share_enabled !== undefined) p.share_enabled = Boolean(Number(p.share_enabled));
+        if (p.like_count_visible !== undefined) p.like_count_visible = Boolean(Number(p.like_count_visible));
+        if (p.pinned !== undefined && p.pinned !== null) p.pinned = Boolean(Number(p.pinned));
+      });
+    }
+    if (body && body.post) {
+      const p = body.post;
+      if (p.comments_enabled !== undefined) p.comments_enabled = Boolean(Number(p.comments_enabled));
+      if (p.share_enabled !== undefined) p.share_enabled = Boolean(Number(p.share_enabled));
+      if (p.like_count_visible !== undefined) p.like_count_visible = Boolean(Number(p.like_count_visible));
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+
+
 /* [MEDIA-ATTACH-FIX] */
 // This forces the media to attach to the post immediately upon creation
 app.use(async (req, res, next) => {
