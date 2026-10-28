@@ -90,6 +90,25 @@ const server = http.createServer(app);
 
 app.disable("x-powered-by");
 
+/* [TURSO-WARMUP] Pre-warm Turso connection so first real request isn't slow */
+(async () => {
+  try {
+    const { query } = require("./src/db");
+    const t0 = Date.now();
+    await query("SELECT 1 AS warmup");
+    const t1 = Date.now() - t0;
+    await query("SELECT 1 AS warmup2");
+    const t2 = Date.now() - t0 - t1;
+    await query("SELECT 1 AS warmup3");
+    const t3 = Date.now() - t0 - t1 - t2;
+    console.log("[TURSO-WARMUP] timings: q1=" + t1 + "ms q2=" + t2 + "ms q3=" + t3 + "ms");
+  } catch (e) {
+    console.error("[TURSO-WARMUP] failed:", e.message);
+  }
+})();
+
+
+
 app.use(helmet());
 
 app.use(cors({
@@ -4067,6 +4086,22 @@ app.use((req, res, next) => {
   };
   next();
 });
+
+
+/* [FEED-500-COLUMN-FIX] */
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    try { await run("ALTER TABLE posts ADD COLUMN category TEXT"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN view_count INTEGER DEFAULT 0"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN is_ai_content INTEGER DEFAULT 0"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN privacy TEXT DEFAULT 'public'"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN boost_boost INTEGER DEFAULT 0"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN status TEXT DEFAULT 'published'"); } catch(e){}
+    try { await run("ALTER TABLE posts ADD COLUMN scheduled_at TEXT"); } catch(e){}
+    console.log("[FEED-500-COLUMN-FIX] posts columns ensured");
+  } catch(e) { console.error("[FEED-500-COLUMN-FIX]", e.message); }
+})();
 
 app.use("/api/v1", v1);
 app.use("/control-api", controlRouter);

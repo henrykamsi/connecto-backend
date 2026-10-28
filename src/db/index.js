@@ -44,6 +44,7 @@ function normalizeSql(sql) {
  * handles the actual database operations.
  */
 async function query(sql, params = []) {
+  const __t0 = Date.now();
   const normalized = normalizeSql(sql).trim();
 
   const trimmedUpper = normalized.replace(/^\\s+/, "").toUpperCase();
@@ -57,6 +58,7 @@ async function query(sql, params = []) {
   if (returnsRows) {
     const rows = await db.all(normalized, params);
 
+    if (Date.now() - __t0 > 1000) console.log("[DB-TIMING] slow query: " + (Date.now() - __t0) + "ms :: " + normalized.slice(0, 80));
     return {
       rows: Array.isArray(rows) ? rows : [],
       rowCount: Array.isArray(rows) ? rows.length : 0
@@ -65,6 +67,7 @@ async function query(sql, params = []) {
 
   const result = await db.run(normalized, params);
 
+    if (Date.now() - __t0 > 1000) console.log("[DB-TIMING] slow query: " + (Date.now() - __t0) + "ms :: " + normalized.slice(0, 80));
   return {
     rows: [],
     rowCount:
