@@ -203,6 +203,131 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+/* [AD-SYSTEM-FIX] */
+
+// 1. Create the Ads Table if it doesn't exist
+(async () => {
+  try {
+    const { run } = require("./src/db");
+    await run(`CREATE TABLE IF NOT EXISTS user_ads (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      link TEXT NOT NULL,
+      button_text TEXT NOT NULL,
+      button_color TEXT NOT NULL,
+      target_impressions INTEGER NOT NULL,
+      current_impressions INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`);
+    console.log("[AD-SYSTEM] Table ready.");
+  } catch (e) { console.error("[AD-SYSTEM]", e.message); }
+})();
+
+// 2. Endpoint to Start an Ad (Squad Payment)
+app.post("/api/v1/ads/promote", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const squad = require("./src/providers/squad");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const { postId, link, buttonText, buttonColor, impressions } = req.body;
+    if (!postId || !link || !impressions) return res.status(400).json({ success: false, error: "MISSING_FIELDS" });
+
+    // Calculate price: 1000 views = 700 NGN
+    const priceNgn = (impressions / 1000) * 700;
+    const reference = "ad-" + uuidv4();
+    const u = await query("SELECT email FROM users WHERE id=$1", [userId]);
+    const email = u.rows[0]?.email || "user@connecto.app";
+
+    let checkoutUrl = null;
+    try {
+      checkoutUrl = await squad.initTransaction({
+        email: email,
+        amountKobo: Math.round(priceNgn * 100),
+        reference: reference,
+        callbackUrl: "connecto://payment-return?ref=" + reference
+      });
+    } catch (e) { console.error("[AD-SQUAD]", e.message); }
+
+    // Save pending ad
+    await run(
+      "INSERT INTO user_ads (id, post_id, user_id, link, button_text, button_color, target_impressions, is_active) VALUES ($1,$2,$3,$4,$5,$6,$7,0)",
+      [uuidv4(), postId, userId, link, buttonText, buttonColor, impressions]
+    );
+
+    res.json({ success: true, checkout_url: checkoutUrl, reference });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// 3. Endpoint to fetch Ad Manager Data
+app.get("/api/v1/ads/my-ads", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query("SELECT * FROM user_ads WHERE user_id=$1 ORDER BY created_at DESC", [userId]);
+    res.json({ success: true, ads: r.rows });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// 4. The 7th-Post Rotation Middleware
+// Intercepts the smart feed, checks if the 7th post slot should be an ad
+app.use(async (req, res, next) => {
+  if (req.path === "/api/v1/feed/smart" && req.method === "GET") {
+    const originalJson = res.json.bind(res);
+    res.json = async function(body) {
+      if (body && body.posts && Array.isArray(body.posts) && body.posts.length >= 7) {
+        try {
+          const { query, run } = require("./src/db");
+          
+          // Find an active ad with remaining impressions
+          const ad = await query("SELECT * FROM user_ads WHERE is_active=1 AND current_impressions < target_impressions ORDER BY RANDOM() LIMIT 1");
+          
+          if (ad.rows.length > 0) {
+            const activeAd = ad.rows[0];
+            // Fetch the actual post for the ad
+            const post = await query("SELECT p.*, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1", [activeAd.post_id]);
+            
+            if (post.rows.length > 0) {
+              const adPost = post.rows[0];
+              adPost.is_ad = true;
+              adPost.ad_link = activeAd.link;
+              adPost.ad_button_text = activeAd.button_text;
+              adPost.ad_button_color = activeAd.button_color;
+              
+              // Inject the ad at index 6 (the 7th slot)
+              body.posts.splice(6, 0, adPost);
+              
+              // Deduct impression
+              await run("UPDATE user_ads SET current_impressions = current_impressions + 1 WHERE id=$1", [activeAd.id]);
+            }
+          }
+        } catch (e) { console.error("[AD-INJECT]", e.message); }
+      }
+      return originalJson(body);
+    };
+  }
+  next();
+});
+
+
 /* [MULTI-MEDIA-API] */
 app.use(async (req, res, next) => {
   const originalJson = res.json.bind(res);
