@@ -842,7 +842,7 @@ router.post('/posts',auth,async(req,res,next)=>{
         req.body.privacy || 'public',
         req.body.boost_boost ? 1 : 0,
         req.body.is_ai_content ? 1 : 0,
-        req.body.scheduledTime || null,
+        req.body.scheduledTime ? new Date(Number(req.body.scheduledTime)).toISOString() : null,
         req.body.scheduledTime ? 'scheduled' : 'published'
       ]
     );

@@ -5134,18 +5134,6 @@ androidAliasRouter.post("/verification/submit", androidAuth, async (req, res) =>
   }
 });
 
-androidAliasRouter.get("/me/bookmarks", androidAuth, async (req, res) => {
-  try {
-    const r = await _aliasQuery(
-      "SELECT p.id, p.text, p.author_id, p.created_at, u.first_name, u.surname, u.username, u.is_verified AS author_verified FROM bookmarks b JOIN posts p ON p.id = b.post_id JOIN users u ON u.id = p.author_id WHERE b.user_id=$1 AND p.deleted_at IS NULL ORDER BY b.created_at DESC LIMIT 100",
-      [req.admin.id]
-    );
-    res.json({ success: true, posts: r.rows });
-  } catch (err) {
-    res.json({ success: true, posts: [] });
-  }
-});
-
 androidAliasRouter.get("/pending-verification", androidAuth, async (req, res) => {
   try {
     const r = await _aliasQuery("SELECT id, message FROM pending_verifications WHERE user_id=$1 AND status='pending' ORDER BY created_at DESC LIMIT 1", [req.admin.id]);
