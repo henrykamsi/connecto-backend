@@ -91,6 +91,27 @@ const server = http.createServer(app);
 app.disable("x-powered-by");
 
 app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body && body.posts && Array.isArray(body.posts)) {
+      body.posts.forEach(p => {
+        if (p.is_ai_content !== undefined) {
+          p.is_ai_content = (p.is_ai_content === true || p.is_ai_content === 1 || p.is_ai_content === "1") ? 1 : 0;
+        }
+      });
+    }
+    if (body && body.post && typeof body.post === "object") {
+      if (body.post.is_ai_content !== undefined) {
+        body.post.is_ai_content = (body.post.is_ai_content === true || body.post.is_ai_content === 1 || body.post.is_ai_content === "1") ? 1 : 0;
+      }
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+
+app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
