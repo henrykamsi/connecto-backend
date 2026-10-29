@@ -5,6 +5,7 @@ const env = require('../config/env');
 const b2 = require('../providers/b2');
 
 const router = express.Router();
+const FEED_CACHE = new Map();
 
 const CATEGORIES = ["Football","Basketball","Athletics","Boxing","Tennis","Cricket","Wrestling","Rugby","World News","Nigerian News","Politics","Business","Economy","Stock Market","Music","Movies","TV Shows","Comedy","Celebrity News","Nollywood","Hollywood","Tech","Coding","AI","Gadgets","Crypto","Startups","Fashion","Beauty","Food","Cooking","Travel","Fitness","Health","Wellness","Religion","Gospel","Education","Books","Art","Photography","History","Jobs","Career","Family","Parenting","Relationships","Local Events","Gaming","Esports","Anime","Comics","Cars","Bikes","Motorsports","Dance","DIY","Nature","Science","Spirituality"];
 
@@ -132,6 +133,13 @@ function bucketPickC(interestPosts, followPosts, randomPosts, interests, wantI, 
 
 router.get("/feed/smart", auth, async (req, res) => {
   try {
+    const cacheKey = req.userId + "_" + (req.query.limit || 20) + "_" + (req.query.offset || 0);
+    if (FEED_CACHE.has(cacheKey)) {
+      const cached = FEED_CACHE.get(cacheKey);
+      if (Date.now() - cached.time < 5 * 60 * 1000) { // 5 min cache
+        return res.json(cached.data);
+      }
+    }
     const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 50);
     const emphasis = String(req.query.emphasis || "auto");
     let mix = MIXES_C[emphasis] || MIXES_C.auto;
@@ -210,7 +218,7 @@ router.get("/feed/smart", auth, async (req, res) => {
     if (out.length > limit) out = out.slice(0, limit);
 
     const signed = await signMedia(out);
-    res.json({
+    const responseData = {
       success: true,
       posts: signed,
       mix,
@@ -220,7 +228,9 @@ router.get("/feed/smart", auth, async (req, res) => {
         p1: { count: b1.pickedF.length + b1.pickedI.length + b1.pickedR.length },
         total_returned: signed.length
       }
-    });
+    };
+    FEED_CACHE.set(cacheKey, { time: Date.now(), data: responseData });
+    res.json(responseData);
   } catch (e) { console.error("[SMART-FEED]", e); res.status(500).json({ success: false, error: e.message }); }
 });
 
