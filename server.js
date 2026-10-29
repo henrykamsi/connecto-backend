@@ -95,6 +95,34 @@ app.use((req, res, next) => {
   res.json = function(body) {
     if (body && body.posts && Array.isArray(body.posts)) {
       body.posts.forEach(p => {
+        // Android expects a Boolean here
+        if (p.is_ai_content !== undefined) p.is_ai_content = p.is_ai_content === true || p.is_ai_content === 1 || p.is_ai_content === "1";
+        if (p.comments_enabled !== undefined) p.comments_enabled = p.comments_enabled !== 0 && p.comments_enabled !== false;
+        if (p.share_enabled !== undefined) p.share_enabled = p.share_enabled !== 0 && p.share_enabled !== false;
+        if (p.pinned !== undefined) p.pinned = p.pinned === true || p.pinned === 1;
+        if (p.viewer_has_reacted !== undefined) p.viewer_has_reacted = p.viewer_has_reacted === true || p.viewer_has_reacted === 1;
+        if (p.author_verified !== undefined) p.author_verified = p.author_verified === 1 || p.author_verified === true ? 1 : 0;
+      });
+    }
+    if (body && body.post && typeof body.post === "object") {
+        const p = body.post;
+        if (p.is_ai_content !== undefined) p.is_ai_content = p.is_ai_content === true || p.is_ai_content === 1 || p.is_ai_content === "1";
+        if (p.comments_enabled !== undefined) p.comments_enabled = p.comments_enabled !== 0 && p.comments_enabled !== false;
+        if (p.share_enabled !== undefined) p.share_enabled = p.share_enabled !== 0 && p.share_enabled !== false;
+        if (p.pinned !== undefined) p.pinned = p.pinned === true || p.pinned === 1;
+        if (p.author_verified !== undefined) p.author_verified = p.author_verified === 1 || p.author_verified === true ? 1 : 0;
+    }
+    return originalJson(body);
+  };
+  next();
+});
+
+
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = function(body) {
+    if (body && body.posts && Array.isArray(body.posts)) {
+      body.posts.forEach(p => {
         if (p.is_ai_content !== undefined) {
           p.is_ai_content = (p.is_ai_content === true || p.is_ai_content === 1 || p.is_ai_content === "1") ? 1 : 0;
         }
