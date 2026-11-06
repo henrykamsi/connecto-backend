@@ -1,3 +1,10 @@
+/* HARDCODED ENV VARS */
+process.env.AGORA_APP_ID = "078f33ef0c8d41bcbfea839223d2b6b3";
+process.env.AGORA_APP_CERTIFICATE = "58f5176bab644d89922ffd98b3a0f52b";
+process.env.AGORA_WEBHOOK_SECRET = "2KV47KHT-n";
+process.env.MAX_CALL_MINUTES = "10";
+process.env.CALL_WARNING_MINUTES = "1";
+
 const express = require("express");
 
 function sha256Hex(s) {
