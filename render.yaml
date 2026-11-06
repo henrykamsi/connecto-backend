@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: connecto-backend
+    env: node
+    envVars:
+      - key: AGORA_APP_ID
+        value: 078f33ef0c8d41bcbfea839223d2b6b3
+      - key: AGORA_APP_CERTIFICATE
+        value: 58f5176bab644d89922ffd98b3a0f52b
+      - key: AGORA_WEBHOOK_SECRET
+        value: 2KV47KHT-n
+      - key: MAX_CALL_MINUTES
+        value: 10
+      - key: CALL_WARNING_MINUTES
+        value: 1
