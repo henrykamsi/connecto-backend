@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Connecto Call</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background-color: #000; }
+        #jitsi-container { height: 100%; width: 100%; }
+    </style>
+    <script src="https://meet.jit.si/external_api.js"></script>
+</head>
+<body>
+    <div id="jitsi-container"></div>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const userName = urlParams.get('name') || "User";
+        const roomName = urlParams.get('room') || "DefaultRoom";
+
+        const domain = 'meet.jit.si';
+        const options = {
+            roomName: roomName,
+            parentNode: document.querySelector('#jitsi-container'),
+            userInfo: { displayName: userName },
+            configOverwrite: {
+                prejoinPageEnabled: false,
+                startWithAudioMuted: false,
+                startWithVideoMuted: false,
+                toolbarButtons: ['microphone', 'camera', 'tileview', 'security', 'hangup'],
+                disableDeepLinking: true,
+                notifications: []
+            },
+            interfaceConfigOverwrite: {
+                SHOW_JITSI_WATERMARK: false,
+                SHOW_WATERMARK_FOR_GUESTS: false,
+                MOBILE_APP_PROMO: false
+            }
+        };
+
+        try {
+            const api = new JitsiMeetExternalAPI(domain, options);
+            
+            // Force the camera to wake up
+            api.addEventListener('videoConferenceJoined', () => {
+                api.executeCommand('toggleVideo'); 
+                setTimeout(() => api.executeCommand('toggleVideo'), 500);
+            });
+
+            // Tell Android to close the call when hung up
+            api.addEventListener('videoConferenceLeft', () => {
+                if (window.Android) window.Android.onCallEnded(); 
+            });
+        } catch (error) {
+            console.error(error);
+        }
+    </script>
+</body>
+</html>
