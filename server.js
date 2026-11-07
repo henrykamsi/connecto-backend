@@ -93,6 +93,9 @@ const controlRouter = require("./control-server");
 const cryptoA = require("crypto");
 function sha256Hex(s){return cryptoA.createHash("sha256").update(String(s)).digest("hex");}
 const app = express();
+
+app.use(express.static("public"));
+
 const server = http.createServer(app);
 
 app.disable("x-powered-by");
