@@ -4242,6 +4242,44 @@ app.post("/api/v1/calls/webhook", express.raw({ type: 'application/json' }), asy
 /* [/AGORA-WEBHOOK] */
 
 app.use("/api/v1", v1);
+
+/* [TRTC-INTEGRATION] */
+const { genUserSig } = require("./src/utils/trtc");
+
+app.get("/api/v1/calls/trtc-token", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const TRTC_SDK_APP_ID = 20050453;
+    const TRTC_SECRET_KEY = "6349a1c9ecae954cc40f9b6e222c583a64fab90c2a50251d1373724a19146e18";
+
+    const userSig = genUserSig(TRTC_SDK_APP_ID, TRTC_SECRET_KEY, userId, 86400);
+
+    res.json({ success: true, sdkAppId: TRTC_SDK_APP_ID, userId, userSig });
+  } catch (err) {
+    console.error("[TRTC-TOKEN]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/trtc/webhook", express.json({ type: "*/*" }), async (req, res) => {
+  try {
+    const payload = req.body;
+    if (payload && payload.EventGroup === "Check") return res.json({ ErrorCode: 0, ErrorInfo: "success" });
+    if (payload && payload.EventGroup) console.log("[TRTC-WEBHOOK]", payload.EventGroup, "|", payload.EventType, "| Room:", payload.RoomId);
+    res.json({ ErrorCode: 0, ErrorInfo: "success" });
+  } catch (err) {
+    console.error("[TRTC-WEBHOOK-ERROR]", err);
+    res.json({ ErrorCode: 0, ErrorInfo: "success" });
+  }
+});
+
 app.use("/control-api", controlRouter);
 
 /* [SHOP-ROUTES] */
