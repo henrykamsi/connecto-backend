@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "connecto-backend",
+      "name": "connecto-backend",
+      "root": "",
+      "buildSystem": "native",
+      "settings": {},
+      "modules": [],
+      "libraries": []
+    }
+  ]
+}
