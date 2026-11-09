@@ -6185,3 +6185,46 @@ app.post("/api/v1/heartbeat", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* [CHAT-SEND-MESSAGE-FIX] */
+app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const conversationId = req.params.id;
+    const body = String(req.body.body || "").trim();
+    const mediaUrl = req.body.media_url || null;
+    const messageType = mediaUrl ? "image" : "text";
+
+    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_BODY_OR_MEDIA_REQUIRED" });
+
+    // Verify user is in the conversation
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    const messageId = uuidv4();
+    
+    // Insert the message
+    await run(
+      "INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1, $2, $3, $4, $5, $6)",
+      [messageId, conversationId, userId, body, messageType, mediaUrl]
+    );
+
+    // Update the conversation's updated_at timestamp so it moves to the top
+    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
+
+    res.status(201).json({ success: true, messageId, body, media_url: mediaUrl, message_type: messageType });
+  } catch (err) {
+    console.error("[CHAT-SEND-MESSAGE]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
