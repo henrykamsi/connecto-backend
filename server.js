@@ -6228,3 +6228,122 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* [SMART-CHAT-SERVER-FIX] */
+// This route accepts EITHER a conversationId OR a userId in the :id parameter.
+app.get("/api/v1/chat/conversations/:id/messages-v3", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const targetId = req.params.id;
+    let conversationId = targetId;
+
+    // Check if the ID provided is actually a User ID instead of a Conversation ID
+    const isConv = await query("SELECT 1 FROM conversations WHERE id=$1 LIMIT 1", [targetId]);
+    
+    if (!isConv.rows.length) {
+      // It's a User ID. Find or create the conversation.
+      const otherUserId = targetId;
+      
+      const existing = await query(
+        "SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1",
+        [userId, otherUserId]
+      );
+
+      if (existing.rows.length) {
+        conversationId = existing.rows[0].id;
+      } else {
+        // Create new conversation
+        conversationId = uuidv4();
+        await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
+        await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), otherUserId]);
+      }
+    }
+
+    // Verify user is a member
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    // Fetch messages
+    const r = await query(
+      "SELECT m.*, u.first_name, u.surname, u.username FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200",
+      [conversationId]
+    );
+
+    res.json({ success: true, conversationId: conversationId, messages: r.rows });
+  } catch (err) {
+    console.error("[SMART-CHAT-FETCH]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// This route accepts EITHER a conversationId OR a userId in the :id parameter for sending.
+app.post("/api/v1/chat/conversations/:id/messages-v3", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const targetId = req.params.id;
+    let conversationId = targetId;
+
+    // Check if it's a User ID
+    const isConv = await query("SELECT 1 FROM conversations WHERE id=$1 LIMIT 1", [targetId]);
+    
+    if (!isConv.rows.length) {
+      const otherUserId = targetId;
+      const existing = await query(
+        "SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1",
+        [userId, otherUserId]
+      );
+
+      if (existing.rows.length) {
+        conversationId = existing.rows[0].id;
+      } else {
+        conversationId = uuidv4();
+        await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
+        await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), otherUserId]);
+      }
+    }
+
+    // Verify user is a member
+    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_MEMBER" });
+
+    const body = String(req.body.body || "").trim();
+    const mediaUrl = req.body.media_url || null;
+    const messageType = mediaUrl ? "image" : "text";
+
+    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_BODY_OR_MEDIA_REQUIRED" });
+
+    const messageId = uuidv4();
+    
+    await run(
+      "INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1, $2, $3, $4, $5, $6)",
+      [messageId, conversationId, userId, body, messageType, mediaUrl]
+    );
+
+    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
+
+    res.status(201).json({ success: true, messageId, conversationId });
+  } catch (err) {
+    console.error("[SMART-CHAT-SEND]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
