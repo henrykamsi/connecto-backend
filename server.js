@@ -6427,3 +6427,69 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
     res.status(201).json({ success: true, messageId, conversationId });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
+
+/* [ULTIMATE-CHAT-FIX] Ignores everything Android sends and makes it work */
+const handleSmartChat = async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    let targetId = req.params.id;
+    let conversationId = null;
+
+    // 1. Is the ID a valid conversation?
+    const isConv = await query("SELECT id FROM conversations WHERE id=$1 LIMIT 1", [targetId]);
+    if (isConv.rows.length) {
+      conversationId = isConv.rows[0].id;
+    } else {
+      // 2. Is the ID a valid user? If yes, find or create the conversation.
+      const isUser = await query("SELECT id FROM users WHERE id=$1 LIMIT 1", [targetId]);
+      if (isUser.rows.length) {
+        const otherUserId = targetId;
+        const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, otherUserId]);
+        if (existing.rows.length) {
+          conversationId = existing.rows[0].id;
+        } else {
+          conversationId = uuidv4();
+          await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
+          await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), otherUserId]);
+        }
+      } else {
+        return res.status(404).json({ success: false, error: "INVALID_ID" });
+      }
+    }
+
+    if (req.method === "GET") {
+      const r = await query("SELECT m.*, u.first_name, u.surname, u.username FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200", [conversationId]);
+      return res.json({ success: true, conversationId, messages: r.rows });
+    }
+
+    if (req.method === "POST") {
+      const body = String(req.body.body || "").trim();
+      const mediaUrl = req.body.media_url || null;
+      const messageType = mediaUrl ? "image" : "text";
+      if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_EMPTY" });
+      
+      const messageId = uuidv4();
+      await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1,$2,$3,$4,$5,$6)", [messageId, conversationId, userId, body, messageType, mediaUrl]);
+      await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
+      
+      return res.status(201).json({ success: true, messageId, conversationId, body });
+    }
+  } catch (err) {
+    console.error("[SMART-CHAT]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+app.get("/api/v1/chat/conversations/:id/messages-v2", handleSmartChat);
+app.post("/api/v1/chat/conversations/:id/messages", handleSmartChat);
+app.post("/api/v1/chat/conversations/:id/messages-v2", handleSmartChat);
