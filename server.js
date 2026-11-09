@@ -6167,3 +6167,21 @@ async function start() {
 start();
 
 /* deploy trigger 2026-11-05T14:16:20Z */
+
+/* [HEARTBEAT-ENDPOINT] */
+app.post("/api/v1/heartbeat", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false }); }
+    const { run } = require("./src/db");
+    await run("UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = $1", [userId]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
