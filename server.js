@@ -6875,3 +6875,63 @@ app.post("/api/v1/media/upload-url", async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* [MEDIA-COMPLETE-ATTACH-FIX] */
+app.post("/api/v1/media/:id/complete", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT * FROM media WHERE id=$1 AND owner_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    await run("UPDATE media SET processing_status='ready' WHERE id=$1", [req.params.id]);
+    res.json({ success: true, media_id: req.params.id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/media/:id/attach", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const postId = String(req.body.post_id || "");
+    if (!postId) return res.status(400).json({ success: false, error: "POST_ID_REQUIRED" });
+
+    const m = await query("SELECT * FROM media WHERE id=$1 AND owner_id=$2 LIMIT 1", [req.params.id, userId]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+
+    const p = await query("SELECT * FROM posts WHERE id=$1 AND author_id=$2 LIMIT 1", [postId, userId]);
+    if (!p.rows.length) return res.status(404).json({ success: false, error: "POST_NOT_FOUND_OR_NOT_OWNER" });
+
+    await run("UPDATE media SET post_id=$1, visibility='public' WHERE id=$2", [postId, req.params.id]);
+    res.json({ success: true, media_id: req.params.id, post_id: postId });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/media/:id", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const m = await query("SELECT * FROM media WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    res.json({ success: true, media: m.rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
