@@ -6806,3 +6806,72 @@ app.post("/api/v1/moderation/warnings/:id/override", async (req, res) => {
 
 /* [ULTIMATE-CHAT-FIX] */
 
+
+/* [MEDIA-UPLOAD-FIX] */
+const { S3Client: MediaS3Client, PutObjectCommand: MediaPutObject } = require("@aws-sdk/client-s3");
+const { getSignedUrl: getMediaSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
+app.post("/api/v1/media/upload-url", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const { content_type, file_size, media_type } = req.body;
+    if (!content_type) return res.status(400).json({ success: false, error: "CONTENT_TYPE_REQUIRED" });
+
+    const credsRows = await query("SELECT * FROM provider_credentials WHERE category='storage' AND provider='b2' AND is_active=1 LIMIT 1");
+    if (!credsRows.rows.length) return res.status(503).json({ success: false, error: "NO_B2_CREDENTIAL" });
+    
+    const row = credsRows.rows[0];
+    const crypto = require("crypto");
+    const KEY = process.env.CONTROL_ENCRYPTION_KEY;
+    const raw = Buffer.from(row.credentials_enc, "base64");
+    const iv = raw.subarray(0, 12);
+    const tag = raw.subarray(12, 28);
+    const data = raw.subarray(28);
+    const decipher = crypto.createDecipheriv("aes-256-gcm", Buffer.from(KEY, "hex"), iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+    const cred = JSON.parse(decrypted.toString("utf8"));
+
+    const s3 = new MediaS3Client({
+      endpoint: cred.endpoint,
+      region: cred.region,
+      credentials: { accessKeyId: cred.keyId, secretAccessKey: cred.applicationKey },
+      forcePathStyle: true
+    });
+
+    const ext = content_type.split("/")[1] || "bin";
+    const key = "users/" + userId + "/" + Date.now() + "-" + uuidv4() + "." + ext;
+
+    const cmd = new MediaPutObject({ Bucket: cred.bucket, Key: key, ContentType: content_type });
+    const uploadUrl = await getMediaSignedUrl(s3, cmd, { expiresIn: 900 });
+
+    const mediaId = uuidv4();
+    await run(
+      "INSERT INTO media (id, owner_id, type, mime_type, size, storage_key, processing_status, visibility) VALUES ($1,$2,$3,$4,$5,$6,'pending','private')",
+      [mediaId, userId, media_type || "file", content_type, file_size || 0, key]
+    );
+
+    res.json({
+      success: true,
+      media_id: mediaId,
+      upload_url: uploadUrl,
+      storage_key: key,
+      method: "PUT",
+      headers: { "Content-Type": content_type },
+      expires_in: 900
+    });
+  } catch (err) {
+    console.error("[MEDIA-UPLOAD-ERROR]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
