@@ -6546,3 +6546,124 @@ const originalGetUser = app._router.stack.find(layer => layer.route && layer.rou
 if (originalGetUser) {
     // This is a fallback check. The actual fix is in the SQL, which we patch below.
 }
+
+/* [AWS-IMAGE-MODERATION] */
+const cryptoAws = require("crypto");
+const httpsAws = require("https");
+
+async function getAwsCredentials() {
+  // Reads from .env. If not set, returns null (disables scanning safely).
+  const accessKey = process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const region = process.env.AWS_REGION || "us-east-1";
+  if (!accessKey || !secretKey) return null;
+  return { accessKey, secretKey, region };
+}
+
+async function scanImageWithAws(imageUrl) {
+  const creds = await getAwsCredentials();
+  if (!creds) return null; // AWS not configured, skip safely
+
+  try {
+    // 1. Download the image and convert to Base64
+    const resp = await fetch(imageUrl);
+    const buffer = await resp.arrayBuffer();
+    const base64Image = Buffer.from(buffer).toString("base64");
+
+    // 2. Prepare the AWS Rekognition Request
+    const endpoint = `https://rekognition.${creds.region}.amazonaws.com/`;
+    const body = JSON.stringify({ Image: { Bytes: base64Image } });
+    
+    // 3. Sign the request using AWS Signature V4
+    const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = amzDate.slice(0, 8);
+    const service = "rekognition";
+    
+    const canonicalHeaders = `content-type:application/x-amz-json-1.1\nhost:rekognition.${creds.region}.amazonaws.com\nx-amz-date:${amzDate}\nx-amz-target:RekognitionService.DetectModerationLabels\n`;
+    const signedHeaders = "content-type;host;x-amz-date;x-amz-target";
+    const payloadHash = cryptoAws.createHash("sha256").update(body).digest("hex");
+    const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+    const credentialScope = `${dateStamp}/${creds.region}/${service}/aws4_request`;
+    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${cryptoAws.createHash("sha256").update(canonicalRequest).digest("hex")}`;
+    
+    const getSignatureKey = (key, date, region, service) => {
+      const kDate = cryptoAws.createHmac("sha256", "AWS4" + key).update(date).digest();
+      const kRegion = cryptoAws.createHmac("sha256", kDate).update(region).digest();
+      const kService = cryptoAws.createHmac("sha256", kRegion).update(service).digest();
+      return cryptoAws.createHmac("sha256", kService).update("aws4_request").digest();
+    };
+    const signingKey = getSignatureKey(creds.secretKey, dateStamp, creds.region, service);
+    const signature = cryptoAws.createHmac("sha256", signingKey).update(stringToSign).digest("hex");
+    
+    const authHeader = `AWS4-HMAC-SHA256 Credential=${creds.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+    // 4. Send the request
+    const awsResp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Date": amzDate,
+        "X-Amz-Target": "RekognitionService.DetectModerationLabels",
+        "Authorization": authHeader
+      },
+      body: body
+    });
+
+    const data = await awsResp.json();
+    if (!data.ModerationLabels) return null;
+
+    // 5. Apply your custom rules
+    const labels = data.ModerationLabels.map(l => l.Name);
+    const confidence = data.ModerationLabels.map(l => l.Confidence);
+
+    let finalLabel = null;
+    let triggeredCount = 0;
+
+    // Check for Nudity
+    if (labels.some(l => l.includes("Explicit Nudity") || l.includes("Sexual Activity"))) {
+      finalLabel = "NUDITY CONTENT (18+)";
+      triggeredCount++;
+    }
+    // Check for Weapons/Violence
+    if (labels.some(l => l.includes("Weapons") || l.includes("Violence") || l.includes("Blood"))) {
+      if (finalLabel) { finalLabel = "INAPPROPRIATE CONTENT"; }
+      else { finalLabel = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL"; }
+      triggeredCount++;
+    }
+
+    if (triggeredCount > 1) finalLabel = "INAPPROPRIATE CONTENT";
+    return finalLabel;
+
+  } catch (e) {
+    console.error("[AWS-SCAN-ERROR]", e.message);
+    return null;
+  }
+}
+
+// Middleware to intercept new post uploads and scan images
+app.use(async (req, res, next) => {
+  if (req.path === "/api/v1/posts" && req.method === "POST") {
+    const originalJson = res.json.bind(res);
+    res.json = async (body) => {
+      if (body && body.post && body.post.media_url) {
+        const url = body.post.media_url;
+        const isVideo = url.includes(".mp4") || url.includes(".mov") || url.includes(".webm");
+        
+        if (!isVideo) {
+          const label = await scanImageWithAws(url);
+          if (label) {
+            // Update database with the label
+            try {
+              const { run } = require("./src/db");
+              await run("UPDATE posts SET warning_label=$1, warning_label_style='danger' WHERE id=$2", [label, body.post.id]);
+              body.post.warning_label = label;
+              body.post.warning_label_style = "danger";
+            } catch (e) { console.error("[AWS-DB-UPDATE]", e.message); }
+          }
+        }
+      }
+      return originalJson(body);
+    };
+  }
+  next();
+});
