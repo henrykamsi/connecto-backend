@@ -3995,52 +3995,6 @@ app.post("/api/v1/messages/:id/read-v2", async (req, res) => {
 
 /* ---------- CONVERSATIONS WITH PRESENCE ---------- */
 
-app.get("/api/v1/chat/conversations/v2", async (req, res) => {
-  try {
-    const { query } = require("./src/db");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    const r = await query(
-      "SELECT c.id, c.type, c.created_at, c.updated_at, u.id AS other_user_id, u.username AS other_username, u.first_name AS other_first_name, u.surname AS other_surname, u.profile_photo_media_id AS other_photo, (SELECT body FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message, (SELECT sent_at FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message_at, (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL) AS other_last_seen FROM conversations c JOIN conversation_members me ON me.conversation_id=c.id AND me.user_id=$1 JOIN conversation_members other ON other.conversation_id=c.id AND other.user_id<>$1 JOIN users u ON u.id=other.user_id LEFT JOIN message_requests_v2 mr ON mr.conversation_id=c.id AND mr.receiver_id=$1 WHERE (mr.status IS NULL OR mr.status='accepted' OR mr.sender_id=$1) ORDER BY COALESCE((SELECT sent_at FROM messages WHERE conversation_id=c.id ORDER BY sent_at DESC LIMIT 1), c.created_at) DESC",
-      [userId]
-    );
-
-    const now = Date.now();
-    const conversations = r.rows.map(function (row) {
-      let presence = "offline";
-      if (row.other_last_seen) {
-        const diff = now - new Date(row.other_last_seen).getTime();
-        if (diff < 60 * 1000) presence = "online";
-        else if (diff < 30 * 60 * 1000) presence = "recent";
-      }
-      return {
-        id: row.id,
-        type: row.type,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        other_user_id: row.other_user_id,
-        other_username: row.other_username,
-        other_first_name: row.other_first_name,
-        other_surname: row.other_surname,
-        other_photo: row.other_photo,
-        last_message: row.last_message,
-        last_message_at: row.last_message_at,
-        other_presence: presence
-      };
-    });
-
-    res.json({ success: true, conversations: conversations });
-  } catch (err) {
-    console.error("[CONV-V2-LIST]", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 /* ---------- MESSAGES WITH STATUS FLAGS ---------- */
 
@@ -6937,6 +6891,8 @@ app.get("/api/v1/media/:id", async (req, res) => {
 });
 
 /* [CONVERSATIONS-V2-RESTORE] */
+
+/* [CONVERSATIONS-V2-FINAL] */
 app.get("/api/v1/chat/conversations/v2", async (req, res) => {
   try {
     const { query } = require("./src/db");
@@ -6949,18 +6905,11 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
     catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
     const r = await query(
-      "SELECT c.id, c.type, c.created_at, c.updated_at, u.id AS other_user_id, u.username AS other_username, u.first_name AS other_first_name, u.surname AS other_surname, u.profile_photo_media_id AS other_photo, (SELECT body FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message, (SELECT sent_at FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message_at, (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL) AS other_last_seen FROM conversations c JOIN conversation_members me ON me.conversation_id=c.id AND me.user_id=$1 JOIN conversation_members other ON other.conversation_id=c.id AND other.user_id<>$1 JOIN users u ON u.id=other.user_id LEFT JOIN message_requests_v2 mr ON mr.conversation_id=c.id AND mr.receiver_id=$1 WHERE (mr.status IS NULL OR mr.status='accepted' OR mr.sender_id=$1) ORDER BY COALESCE((SELECT sent_at FROM messages WHERE conversation_id=c.id ORDER BY sent_at DESC LIMIT 1), c.created_at) DESC",
+      "SELECT c.id, c.type, c.created_at, c.updated_at, u.id AS other_user_id, u.username AS other_username, u.first_name AS other_first_name, u.surname AS other_surname, u.profile_photo_media_id AS other_photo, (SELECT body FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message, (SELECT sent_at FROM messages WHERE conversation_id=c.id AND deleted_at IS NULL ORDER BY sent_at DESC LIMIT 1) AS last_message_at FROM conversations c JOIN conversation_members me ON me.conversation_id=c.id AND me.user_id=$1 JOIN conversation_members other ON other.conversation_id=c.id AND other.user_id<>$1 JOIN users u ON u.id=other.user_id ORDER BY COALESCE((SELECT sent_at FROM messages WHERE conversation_id=c.id ORDER BY sent_at DESC LIMIT 1), c.created_at) DESC",
       [userId]
     );
 
-    const now = Date.now();
     const conversations = r.rows.map(function (row) {
-      let presence = "offline";
-      if (row.other_last_seen) {
-        const diff = now - new Date(row.other_last_seen).getTime();
-        if (diff < 60 * 1000) presence = "online";
-        else if (diff < 30 * 60 * 1000) presence = "recent";
-      }
       return {
         id: row.id,
         type: row.type,
@@ -6973,13 +6922,13 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
         other_photo: row.other_photo,
         last_message: row.last_message,
         last_message_at: row.last_message_at,
-        other_presence: presence
+        other_presence: "offline"
       };
     });
 
     res.json({ success: true, conversations: conversations });
   } catch (err) {
-    console.error("[CONV-V2-LIST]", err);
+    console.error("[CONV-V2-FINAL]", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
