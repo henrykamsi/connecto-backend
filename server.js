@@ -6803,3 +6803,6 @@ app.post("/api/v1/moderation/warnings/:id/override", async (req, res) => {
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
+
+/* [ULTIMATE-CHAT-FIX] */
+
