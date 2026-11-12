@@ -6667,3 +6667,139 @@ app.use(async (req, res, next) => {
   }
   next();
 });
+
+/* [MODERATION-ENDPOINTS] */
+const httpsMod = require("https");
+
+function getOpenAiKeys() {
+  const keys = process.env.OPENAI_API_KEYS || process.env.OPENAI_API_KEY;
+  if (!keys) return [];
+  return keys.split(",").map(k => k.trim()).filter(k => k.length > 0);
+}
+
+async function callOpenAI(text, base64Image) {
+  const keys = getOpenAiKeys();
+  if (keys.length === 0) return { success: true, score: 0, labels: [] };
+
+  const input = [];
+  if (text) input.push({ type: "text", text: text });
+  if (base64Image) input.push({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + base64Image } });
+
+  const body = JSON.stringify({ model: "omni-moderation-latest", input: input });
+
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const resp = await fetch("https://api.openai.com/v1/moderations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + keys[i] },
+        body: body
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        return { success: true, result: data.results[0] };
+      }
+    } catch (e) {
+      console.warn("[MODERATION] Key", i, "failed:", e.message);
+    }
+  }
+  return { success: false, error: "All API keys failed" };
+}
+
+// 1. PRE-CHECK ENDPOINT (Called before upload)
+app.post("/api/v1/moderate-content", async (req, res) => {
+  try {
+    const { text, image_base64 } = req.body;
+    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
+
+    const scan = await callOpenAI(text, image_base64);
+    if (!scan.success) return res.json({ success: true, action: "ALLOW", label: null, score: 0 });
+
+    const cats = scan.result.categories || {};
+    const scores = scan.result.category_scores || {};
+    const maxScore = Math.max(...Object.values(scores));
+    const labels = [];
+
+    // Determine Labels
+    if (cats["sexual"] || cats["sexual/minors"]) {
+      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", score: maxScore });
+      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
+    }
+    if (cats["violence/graphic"] || cats["violence"]) {
+      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
+    }
+    if (cats["self-harm"]) {
+      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
+    }
+    if (cats["harassment"] || cats["hate"]) {
+      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing multiple types of inappropriate content." });
+    }
+    // Horror logic (using OpenAI's generic fear/disturbing signals if available, else default)
+    if (cats["violence/graphic"] && maxScore > 0.8) {
+       labels.push({ text: "HORROR OR SCARY CONTENT FOR KIDS", reason: "This post contains scary or horror-themed content that may not be suitable for young children." });
+    }
+
+    let finalLabel = null;
+    let finalReason = null;
+    if (labels.length > 1) {
+      finalLabel = "INAPPROPRIATE CONTENT";
+      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
+    } else if (labels.length === 1) {
+      finalLabel = labels[0].text;
+      finalReason = labels[0].reason;
+    }
+
+    res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
+
+  } catch (e) {
+    console.error("[MODERATION] Error:", e.message);
+    res.json({ success: true, action: "ALLOW", label: null, score: 0 }); // Fail-safe
+  }
+});
+
+// 2. GET WARNINGS ENDPOINT
+app.get("/api/v1/moderation/warnings", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; } catch (e) { return res.status(401).json({ success: false }); }
+
+    const { query } = require("./src/db");
+    const r = await query("SELECT id, text, media_url, media_type, warning_label, warning_label_style, created_at FROM posts WHERE author_id=$1 AND warning_label IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC", [userId]);
+    res.json({ success: true, warnings: r.rows });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// 3. DELETE WARNING POST
+app.post("/api/v1/moderation/warnings/:id/delete", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; } catch (e) { return res.status(401).json({ success: false }); }
+
+    const { run } = require("./src/db");
+    await run("UPDATE posts SET deleted_at=CURRENT_TIMESTAMP WHERE id=$1 AND author_id=$2", [req.params.id, userId]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// 4. OVERRIDE WARNING
+app.post("/api/v1/moderation/warnings/:id/override", async (req, res) => {
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; } catch (e) { return res.status(401).json({ success: false }); }
+
+    const { run } = require("./src/db");
+    await run("UPDATE posts SET warning_label=NULL, warning_label_style=NULL WHERE id=$1 AND author_id=$2", [req.params.id, userId]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
