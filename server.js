@@ -6445,8 +6445,6 @@ const handleSmartChat = async (req, res) => {
 };
 
 app.get("/api/v1/chat/conversations/:id/messages-v2", handleSmartChat);
-app.post("/api/v1/chat/conversations/:id/messages", handleSmartChat);
-app.post("/api/v1/chat/conversations/:id/messages-v2", handleSmartChat);
 
 /* [PROFILE-FEATURES-FIX] Re-adding Location, Online Status, and Badges */
 const jwtFix = require("jsonwebtoken");
@@ -6929,6 +6927,76 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
     res.json({ success: true, conversations: conversations });
   } catch (err) {
     console.error("[CONV-V2-FINAL]", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* [MESSAGE-SEND-FINAL-FIX] */
+app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    let conversationId = req.params.id;
+    const isConv = await query("SELECT id FROM conversations WHERE id=$1 LIMIT 1", [conversationId]);
+    if (!isConv.rows.length) {
+      const isUser = await query("SELECT id FROM users WHERE id=$1 LIMIT 1", [conversationId]);
+      if (isUser.rows.length) {
+        const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, conversationId]);
+        if (existing.rows.length) { conversationId = existing.rows[0].id; }
+        else {
+          conversationId = uuidv4();
+          await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
+          await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), isUser.rows[0].id]);
+        }
+      } else { return res.status(404).json({ success: false, error: "INVALID_ID" }); }
+    }
+
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ success: false, error: "MESSAGE_EMPTY" });
+    
+    const messageId = uuidv4();
+    await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type) VALUES ($1,$2,$3,$4,'text')", [messageId, conversationId, userId, body]);
+    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
+    
+    res.status(201).json({ success: true, message: "Message sent", messageId: messageId, conversationId: conversationId });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+    
+    let conversationId = req.params.id;
+    const isConv = await query("SELECT id FROM conversations WHERE id=$1 LIMIT 1", [conversationId]);
+    if (!isConv.rows.length) return res.status(404).json({ success: false, error: "INVALID_ID" });
+
+    const body = String(req.body.body || "").trim();
+    if (!body) return res.status(400).json({ success: false, error: "MESSAGE_EMPTY" });
+    
+    const messageId = uuidv4();
+    await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type) VALUES ($1,$2,$3,$4,'text')", [messageId, conversationId, userId, body]);
+    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
+    
+    res.status(201).json({ success: true, message: "Message sent", messageId: messageId, conversationId: conversationId });
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
