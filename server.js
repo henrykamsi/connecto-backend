@@ -314,56 +314,51 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "10mb" }));
 
 
-/* [ABSOLUTE-MODERATION-INTERCEPTOR] */
+/* [FINAL-MODERATION] */
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
   res.json = async function(body) {
-    // If a post was just created and we have the text, moderate it NOW
-    if (req.method === 'POST' && req.path.endsWith('/posts') && body && body.post && body.post.id && req.body.body) {
+    if (req.method === 'POST' && req.path.endsWith('/posts') && body && body.post && body.post.id) {
       try {
         const keys = (process.env.OPENAI_API_KEYS || "").split(",").map(k => k.trim()).filter(Boolean);
-        if (keys.length > 0) {
+        if (keys.length > 0 && req.body.body) {
           const payload = JSON.stringify({ model: "omni-moderation-latest", input: [{ type: "text", text: req.body.body }] });
-          
           for (const key of keys) {
             const r = await fetch("https://api.openai.com/v1/moderations", {
               method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
               body: payload
             });
-            
             if (r.ok) {
               const data = await r.json();
               const cats = data.results[0].categories || {};
-              let warningLabel = null;
+              let label = null;
+              if (cats["sexual"] || cats["sexual/minors"]) label = "NUDITY CONTENT (18+)";
+              else if (cats["violence"] || cats["violence/graphic"]) label = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL";
+              else if (cats["self-harm"]) label = "DO NOT TRY THIS";
+              else if (cats["harassment"] || cats["hate"]) label = "INAPPROPRIATE CONTENT";
               
-              if (cats["sexual"] || cats["sexual/minors"]) warningLabel = "NUDITY CONTENT (18+)";
-              else if (cats["violence"] || cats["violence/graphic"]) warningLabel = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL";
-              else if (cats["self-harm"]) warningLabel = "DO NOT TRY THIS";
-              else if (cats["harassment"] || cats["hate"]) warningLabel = "INAPPROPRIATE CONTENT";
-              
-              if (warningLabel) {
-                // UPDATE THE DB IMMEDIATELY
+              if (label) {
                 const { run } = require("./src/db");
-                await run("UPDATE posts SET warning_label=$1, warning_label_style='danger' WHERE id=$2", [warningLabel, body.post.id]);
-                
-                // Inject the label into the response so the app sees it instantly
-                body.post.warning_label = warningLabel;
+                await run("UPDATE posts SET warning_label=$1, warning_label_style='danger' WHERE id=$2", [label, body.post.id]);
+                body.post.warning_label = label;
                 body.post.warning_label_style = "danger";
-                console.log("[ABSOLUTE-MOD] Successfully labeled post:", body.post.id, "as", warningLabel);
+                console.log("[FINAL-MOD] Labeled post:", label);
               }
               break;
             }
           }
         }
-      } catch (e) {
-        console.error("[ABSOLUTE-MOD-ERROR]", e.message);
-      }
+      } catch (e) { console.error("[FINAL-MOD-ERROR]", e.message); }
     }
     return originalJson(body);
   };
   next();
 });
+
+
+
+
 
 
 

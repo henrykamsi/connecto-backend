@@ -217,7 +217,9 @@ router.get("/feed/smart", auth, async (req, res) => {
 
     if (out.length > limit) out = out.slice(0, limit);
 
-    const signed = await signMedia(out);
+    const seen = new Set();
+    const uniqueOut = out.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
+    const signed = await signMedia(uniqueOut);
     const responseData = {
       success: true,
       posts: signed,
