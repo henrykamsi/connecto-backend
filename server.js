@@ -7138,3 +7138,89 @@ app.post("/api/v1/posts", async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* [MODERATION-RESTORE] */
+async function callOpenAIForModeration(text, base64Image) {
+  const keysRaw = process.env.OPENAI_API_KEYS || process.env.OPENAI_API_KEY;
+  if (!keysRaw) return { ok: false, reason: "NO_KEYS" };
+  const keys = keysRaw.split(",").map(function(k){return k.trim();}).filter(function(k){return k.length > 0;});
+  if (!keys.length) return { ok: false, reason: "NO_KEYS" };
+
+  const input = [];
+  if (text) input.push({ type: "text", text: text });
+  if (base64Image) input.push({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + base64Image } });
+
+  const body = JSON.stringify({ model: "omni-moderation-latest", input: input });
+
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      const r = await fetch("https://api.openai.com/v1/moderations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + keys[i] },
+        body: body
+      });
+      if (r.ok) {
+        const data = await r.json();
+        return { ok: true, result: data.results[0] };
+      } else {
+        console.log("[MODERATION] Key " + i + " failed: HTTP " + r.status);
+      }
+    } catch (e) {
+      console.log("[MODERATION] Key " + i + " error: " + e.message);
+    }
+  }
+  return { ok: false, reason: "ALL_KEYS_FAILED" };
+}
+
+app.post("/api/v1/moderate-content", async (req, res) => {
+  try {
+    const { text, image_base64 } = req.body || {};
+    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
+
+    const scan = await callOpenAIForModeration(text, image_base64);
+    if (!scan.ok) {
+      return res.json({ success: true, action: "SYSTEM CHECKING", label: "SYSTEM CHECKING", reason: "Content moderation is currently unavailable. Please allow up to 48 hours for review.", score: 0 });
+    }
+
+    const cats = scan.result.categories || {};
+    const scores = scan.result.category_scores || {};
+    let maxScore = 0;
+    Object.keys(scores).forEach(function(k){ if (scores[k] > maxScore) maxScore = scores[k]; });
+
+    const labels = [];
+
+    if (cats["sexual"] || cats["sexual/minors"]) {
+      if (maxScore > 0.99) {
+        return res.json({ success: true, action: "BLOCK", label: "NUDITY CONTENT (18+)", reason: "This cannot be uploaded due to sexual or adult content.", score: maxScore });
+      }
+      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
+    }
+    if (cats["violence"] || cats["violence/graphic"]) {
+      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
+    }
+    if (cats["self-harm"] || cats["self-harm/intent"] || cats["self-harm/instructions"]) {
+      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
+    }
+    if (cats["harassment"] || cats["hate"]) {
+      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing inappropriate content." });
+    }
+
+    if (labels.length === 0) {
+      return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: maxScore });
+    }
+
+    let finalLabel, finalReason;
+    if (labels.length > 1) {
+      finalLabel = "INAPPROPRIATE CONTENT";
+      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
+    } else {
+      finalLabel = labels[0].text;
+      finalReason = labels[0].reason;
+    }
+
+    return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
+  } catch (err) {
+    console.error("[MODERATE-CONTENT]", err);
+    return res.json({ success: true, action: "SYSTEM CHECKING", label: "SYSTEM CHECKING", reason: "Content moderation is currently unavailable. Please allow up to 48 hours for review.", score: 0 });
+  }
+});
