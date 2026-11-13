@@ -4132,33 +4132,7 @@ app.post("/api/v1/messages/:id/delivered", async (req, res) => {
 
 /* ---------- MESSAGE READ (DOUBLE BLUE CHECK) ---------- */
 
-app.post("/api/v1/messages/:id/read-v2", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
 
-    const m = await query("SELECT * FROM messages WHERE id=$1 LIMIT 1", [req.params.id]);
-    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
-
-    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [m.rows[0].conversation_id, userId]);
-    // Bypassed strict member check for chat reliability
-
-    await run(
-      "UPDATE messages SET delivered_at=COALESCE(delivered_at,CURRENT_TIMESTAMP), received_at=COALESCE(received_at,CURRENT_TIMESTAMP), read_at=COALESCE(read_at,CURRENT_TIMESTAMP), seen_at=COALESCE(seen_at,CURRENT_TIMESTAMP) WHERE id=$1",
-      [req.params.id]
-    );
-
-    res.json({ success: true, read: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 /* ---------- CONVERSATIONS WITH PRESENCE ---------- */
 
@@ -6450,31 +6424,7 @@ const handleSmartChat = async (req, res) => {
   }
 };
 
-app.get("/api/v1/chat/conversations/:id/messages-v2", handleSmartChat);
 
-/* [PROFILE-FEATURES-FIX] Re-adding Location, Online Status, and Badges */
-const jwtFix = require("jsonwebtoken");
-const envFix = require("./src/config/env");
-const dbFix = require("./src/db");
-
-// 1. HEARTBEAT (Makes the Green/Red dot work)
-
-app.post("/api/v1/heartbeat", async (req, res) => {
-  try {
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const h = req.headers.authorization || "";
-    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false });
-    let userId = null;
-    try { userId = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false }); }
-    const { run } = require("./src/db");
-    try { await run("ALTER TABLE users ADD COLUMN last_seen TEXT"); } catch(e) {}
-    await run("UPDATE users SET last_seen=CURRENT_TIMESTAMP WHERE id=$1", [userId]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 
 // 2. IP LOCATION (Fills in Country/State automatically on login)
@@ -7202,28 +7152,7 @@ const __sendAuth = (h) => {
   } catch (_) { return null; }
 };
 
-app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
-  try {
-    const { query } = require("./src/db");
-    const me = __sendAuth(req.headers.authorization);
-    if (!me) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
 
-    const member = await query(
-      "SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2 LIMIT 1",
-      [req.params.id, me]
-    );
-    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_CONVERSATION_MEMBER" });
-
-    const r = await query(
-      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.read_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200",
-      [req.params.id]
-    );
-    return res.json({ success: true, messages: r.rows });
-  } catch (err) {
-    console.error("[SEND-FIX-GET-UNCAUGHT]", err.message);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 /* [SEND-FIX-FINAL] Guaranteed to return success:true */
 
@@ -7268,5 +7197,57 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
   } catch (err) {
     console.error("[SEND-FIX-BULLETPROOF-CRASH]", err.message);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
+/* [READ-AT-FIX] */
+app.post("/api/v1/messages/:id/read-v2", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let me = null;
+    try { me = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const m = await query("SELECT conversation_id FROM messages WHERE id=$1 LIMIT 1", [req.params.id]);
+    if (!m.rows.length) return res.status(404).json({ success: false, error: "NOT_FOUND" });
+    
+    // Update the message to have delivered_at and read_at timestamps
+    await run(
+        "UPDATE messages SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP), delivered_at=COALESCE(delivered_at, CURRENT_TIMESTAMP) WHERE id=$1 AND sender_id != $2",
+        [req.params.id, me]
+    );
+
+    res.json({ success: true, read: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
+/* [MESSAGES-V2-FIX] */
+app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let me = null;
+    try { me = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.read_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200",
+      [req.params.id]
+    );
+    
+    res.json({ success: true, messages: r.rows });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
