@@ -6223,22 +6223,24 @@ start();
 /* deploy trigger 2026-11-05T14:16:20Z */
 
 /* [HEARTBEAT-ENDPOINT] */
+
 app.post("/api/v1/heartbeat", async (req, res) => {
   try {
     const jwt = require("jsonwebtoken");
     const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false });
     let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false }); }
+    try { userId = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false }); }
     const { run } = require("./src/db");
-    await run("UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = $1", [userId]);
+    try { await run("ALTER TABLE users ADD COLUMN last_seen TEXT"); } catch(e) {}
+    await run("UPDATE users SET last_seen=CURRENT_TIMESTAMP WHERE id=$1", [userId]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 /* [CHAT-SEND-MESSAGE-FIX] */
 /* [SMART-CHAT-SERVER-FIX] */
@@ -6431,20 +6433,24 @@ const envFix = require("./src/config/env");
 const dbFix = require("./src/db");
 
 // 1. HEARTBEAT (Makes the Green/Red dot work)
+
 app.post("/api/v1/heartbeat", async (req, res) => {
   try {
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false });
     let userId = null;
-    try { const p = jwtFix.verify(authHeader.slice(7), envFix.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false }); }
-    
-    await dbFix.run("UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = $1", [userId]);
+    try { userId = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false }); }
+    const { run } = require("./src/db");
+    try { await run("ALTER TABLE users ADD COLUMN last_seen TEXT"); } catch(e) {}
+    await run("UPDATE users SET last_seen=CURRENT_TIMESTAMP WHERE id=$1", [userId]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 // 2. IP LOCATION (Fills in Country/State automatically on login)
 // We append a middleware that runs right after your login route finishes
