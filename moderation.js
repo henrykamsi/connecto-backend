@@ -34,7 +34,18 @@ router.post("/", async (req, res) => {
       }
 
       if (mediaUrl && mediaUrl.startsWith("http")) {
-        input.push({ type: "image_url", image_url: { url: mediaUrl } });
+        try {
+          // Download the image from B2 and convert to Base64 so GPT can read it
+          const imgRes = await fetch(mediaUrl);
+          if (imgRes.ok) {
+            const arrayBuffer = await imgRes.arrayBuffer();
+            const base64Img = Buffer.from(arrayBuffer).toString("base64");
+            const mime = imgRes.headers.get("content-type") || "image/jpeg";
+            input.push({ type: "image_url", image_url: { url: "data:" + mime + ";base64," + base64Img } });
+          }
+        } catch (e) {
+          console.warn("[IMG-DOWNLOAD-FAIL]", e.message);
+        }
       }
 
       const payload = JSON.stringify({ model: "omni-moderation-latest", input: input });
