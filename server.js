@@ -7044,3 +7044,97 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/* [POST-CREATION-WITH-MODERATION] */
+app.post("/api/v1/posts", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    
+    const authHeader = req.headers.authorization || "";
+    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let userId = null;
+    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
+    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const text = String(req.body.body || req.body.text || "").trim();
+    const visibility = req.body.visibility || "public";
+    const commentsEnabled = req.body.commentsEnabled !== undefined ? (req.body.commentsEnabled ? 1 : 0) : 1;
+    const shareEnabled = req.body.shareEnabled !== undefined ? (req.body.shareEnabled ? 1 : 0) : 1;
+    const isAiContent = req.body.is_ai_content ? 1 : 0;
+
+    // --- MODERATION BEFORE INSERT ---
+    let warningLabel = null;
+    let warningStyle = null;
+    
+    try {
+      const keys = (process.env.OPENAI_API_KEYS || "").split(",").map(k => k.trim()).filter(Boolean);
+      if (keys.length > 0 && text) {
+        const modBody = JSON.stringify({ model: "omni-moderation-latest", input: [{ type: "text", text: text }] });
+        
+        let moderationResult = null;
+        for (const key of keys) {
+          try {
+            const modResp = await fetch("https://api.openai.com/v1/moderations", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+              body: modBody
+            });
+            if (modResp.ok) {
+              const modData = await modResp.json();
+              moderationResult = modData.results[0];
+              break;
+            }
+          } catch (e) { console.warn("[MOD-KEY-FAIL]", e.message); }
+        }
+        
+        if (moderationResult) {
+          const cats = moderationResult.categories || {};
+          const maxScore = Math.max(...Object.values(moderationResult.category_scores || {0: 0}));
+          
+          if (cats["sexual"] || cats["sexual/minors"]) {
+            if (maxScore > 0.99) return res.status(400).json({ success: false, error: "UPLOAD_BLOCKED: Nudity/sexual content detected" });
+            warningLabel = "NUDITY CONTENT (18+)";
+            warningStyle = "danger";
+          }
+          if (cats["violence"] || cats["violence/graphic"]) {
+            if (maxScore > 0.99) return res.status(400).json({ success: false, error: "UPLOAD_BLOCKED: Violent content detected" });
+            warningLabel = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL";
+            warningStyle = "danger";
+          }
+          if (cats["self-harm"]) {
+            warningLabel = "DO NOT TRY THIS";
+            warningStyle = "danger";
+          }
+          if (cats["harassment"] || cats["hate"]) {
+            warningLabel = "INAPPROPRIATE CONTENT";
+            warningStyle = "danger";
+          }
+        }
+      }
+    } catch (modError) {
+      console.error("[POST-MODERATION-SKIP]", modError.message);
+      // Continue creating the post even if moderation fails
+    }
+
+    // --- INSERT POST ---
+    const postId = uuidv4();
+    await run(
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, is_ai_content, warning_label, warning_label_style) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [postId, userId, text, visibility, commentsEnabled, shareEnabled, isAiContent, warningLabel, warningStyle]
+    );
+
+    // --- FETCH CREATED POST ---
+    const r = await query(
+      "SELECT p.*, u.first_name, u.surname, u.username, u.profile_photo_media_id FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 LIMIT 1",
+      [postId]
+    );
+
+    return res.status(201).json({ success: true, post: r.rows[0] });
+  } catch (err) {
+    console.error("[POST-CREATE-FINAL]", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
