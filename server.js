@@ -312,6 +312,8 @@ app.use((req, res, next) => {
 })();
 
 app.use(express.json({ limit: "10mb" }));
+app.use("/api/v1/posts", require("./moderation"));
+
 
 
 /* [FINAL-MODERATION] */
