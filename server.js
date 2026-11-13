@@ -7167,70 +7167,79 @@ async function callOpenAI(text, base64Image) {
 /* [MODERATION-ROUTE-FIX] */
 
 /* [MODERATION-ENDPOINT-FINAL] */
+
+/* [MODERATE-CONTENT-FINAL] */
 app.post("/api/v1/moderate-content", async (req, res) => {
   try {
-    const { text, image_base64 } = req.body || {};
-    if (!text && !image_base64) {
-      return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
-    }
+    const { text, image_base64 } = req.body;
+    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
 
-    const keys = (process.env.OPENAI_API_KEYS || process.env.OPENAI_API_KEY || "")
-      .split(",").map(k => k.trim()).filter(k => k.length > 0);
-
+    const keys = (process.env.OPENAI_API_KEYS || "").split(",").map(k => k.trim()).filter(k => k.length > 0);
     if (keys.length === 0) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed. Our moderation system can take up to 48 hours. Please do not panic." });
+      return res.json({ success: true, action: "SYSTEM_CHECKING", label: "SYSTEM CHECKING", reason: "Video is still being processed. Our content moderation can take up to 48 hours. Please do not panic. This does not mean anything is wrong for now." });
     }
 
     const input = [];
     if (text) input.push({ type: "text", text: text });
     if (image_base64) input.push({ type: "image_url", image_url: { url: "data:image/jpeg;base64," + image_base64 } });
 
+    const body = JSON.stringify({ model: "omni-moderation-latest", input: input });
+    
     let result = null;
     for (const key of keys) {
       try {
         const resp = await fetch("https://api.openai.com/v1/moderations", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-          body: JSON.stringify({ model: "omni-moderation-latest", input: input })
+          body: body
         });
         if (resp.ok) {
           const data = await resp.json();
           result = data.results[0];
           break;
         }
-      } catch (e) {}
+      } catch (e) { console.warn("[MODERATION] Key failed:", e.message); }
     }
 
     if (!result) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed." });
+      return res.json({ success: true, action: "SYSTEM_CHECKING", label: "SYSTEM CHECKING", reason: "Video is still being processed. Our content moderation can take up to 48 hours. Please do not panic. This does not mean anything is wrong for now." });
     }
 
     const cats = result.categories || {};
-    const maxScore = Math.max(0, ...Object.values(result.category_scores || {}));
+    const scores = result.category_scores || {};
+    const maxScore = Math.max(...Object.values(scores));
     const labels = [];
 
     if (cats["sexual"] || cats["sexual/minors"]) {
-      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", reason: "This cannot be uploaded due to inappropriate content." });
-      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content." });
+      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", score: maxScore });
+      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
     }
     if (cats["violence/graphic"] || cats["violence"]) {
-      labels.push({ text: "OBJECTS MIGHT BE HARMFUL", reason: "This video contains weapons or harmful objects." });
+      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
     }
     if (cats["self-harm"]) {
-      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior." });
+      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
     }
     if (cats["harassment"] || cats["hate"]) {
-      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post contains inappropriate content." });
+      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing multiple types of inappropriate content." });
+    }
+    if (cats["violence/graphic"] && maxScore > 0.8) {
+       labels.push({ text: "HORROR OR SCARY CONTENT FOR KIDS", reason: "This post contains scary or horror-themed content that may not be suitable for young children." });
     }
 
+    let finalLabel = null;
+    let finalReason = null;
     if (labels.length > 1) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "INAPPROPRIATE CONTENT", reason: "Contains multiple types of inappropriate content." });
+      finalLabel = "INAPPROPRIATE CONTENT";
+      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
     } else if (labels.length === 1) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: labels[0].text, reason: labels[0].reason });
-    } else {
-      return res.json({ success: true, action: "ALLOW", label: null, reason: null });
+      finalLabel = labels[0].text;
+      finalReason = labels[0].reason;
     }
-  } catch (err) {
-    return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed." });
+
+    res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
+  } catch (e) {
+    console.error("[MODERATE-CONTENT]", e.message);
+    res.json({ success: true, action: "SYSTEM_CHECKING", label: "SYSTEM CHECKING", reason: "Video is still being processed. Our content moderation can take up to 48 hours. Please do not panic. This does not mean anything is wrong for now." });
   }
 });
