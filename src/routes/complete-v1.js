@@ -915,7 +915,7 @@ router.get('/users/:id/posts',auth,async(req,res,next)=>{
     else if (type === 'video') extra = " AND EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.type='video' AND m.deleted_at IS NULL)";
 
     const r = await query(
-      `SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at,
+      `SELECT p.id, p.author_id, p.text, p.audience, p.comments_enabled, p.like_count_visible, p.share_enabled, p.original_post_id, p.created_at, p.updated_at, p.deleted_at, p.warning_label, p.warning_label_style,
               u.first_name, u.surname, u.username, u.profile_photo_media_id, CAST(u.is_verified AS INTEGER) AS author_verified,
               COALESCE(p.view_count, 0) AS view_count,
               (u.pinned_post_id = p.id) AS pinned,
