@@ -6746,7 +6746,11 @@ app.post("/api/v1/posts", async (req, res) => {
     const visibility = req.body.visibility || "public";
     const commentsEnabled = req.body.commentsEnabled !== undefined ? (req.body.commentsEnabled ? 1 : 0) : 1;
     const shareEnabled = req.body.shareEnabled !== undefined ? (req.body.shareEnabled ? 1 : 0) : 1;
-    const isAiContent = req.body.is_ai_content ? 1 : 0;
+    
+const isAiContent = req.body.is_ai_content ? 1 : 0;
+const clientWarningLabel = req.body.warning_label || null;
+const clientWarningStyle = req.body.warning_label_style || (clientWarningLabel ? "danger" : null);
+
 
     // --- MODERATION BEFORE INSERT ---
     let warningLabel = null;
@@ -6806,7 +6810,7 @@ app.post("/api/v1/posts", async (req, res) => {
     const postId = uuidv4();
     await run(
       "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, is_ai_content, warning_label, warning_label_style) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-      [postId, userId, text, visibility, commentsEnabled, shareEnabled, isAiContent, warningLabel, warningStyle]
+      [postId, userId, text, visibility, commentsEnabled, shareEnabled, isAiContent, warningLabel || clientWarningLabel, warningStyle || clientWarningStyle]
     );
 
     // --- FETCH CREATED POST ---
