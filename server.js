@@ -312,6 +312,31 @@ app.use((req, res, next) => {
 })();
 
 app.use(express.json({ limit: "10mb" }));
+
+
+/* [WARNINGS-FIX-FINAL] */
+app.get("/api/v1/moderation/warnings", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    const h = req.headers.authorization || "";
+    if (!h.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+    let me = null;
+    try { me = jwt.verify(h.slice(7), envLocal.jwt.secret).sub; } catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
+
+    const r = await query(
+      "SELECT id, text, warning_label, warning_label_style, created_at FROM posts WHERE author_id=$1 AND warning_label IS NOT NULL ORDER BY created_at DESC",
+      [me]
+    );
+    
+    res.json({ success: true, warnings: r.rows });
+  } catch (err) {
+    console.error("[WARNINGS-FIX-FINAL-ERROR]", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.use("/api/v1/posts", require("./moderation"));
 
 
@@ -6652,20 +6677,7 @@ async function callOpenAI(text, base64Image) {
 // 1. PRE-CHECK ENDPOINT (Called before upload)
 
 // 2. GET WARNINGS ENDPOINT
-app.get("/api/v1/moderation/warnings", async (req, res) => {
-  try {
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; } catch (e) { return res.status(401).json({ success: false }); }
 
-    const { query } = require("./src/db");
-    const r = await query("SELECT id, text, media_url, media_type, warning_label, warning_label_style, created_at FROM posts WHERE author_id=$1 AND warning_label IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC", [userId]);
-    res.json({ success: true, warnings: r.rows });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
 
 // 3. DELETE WARNING POST
 app.post("/api/v1/moderation/warnings/:id/delete", async (req, res) => {
