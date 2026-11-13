@@ -1324,59 +1324,6 @@ router.post('/posts/:postId/comments',auth,async(req,res,next)=>{
 
 /* CHAT */
 
-router.post('/chat/conversations',auth,async(req,res,next)=>{
-  try {
-    const otherUserId = req.body.userId;
-
-    if (!otherUserId) {
-      return res.status(400).json({
-        success:false,
-        error:'userId required'
-      });
-    }
-
-    const existing = await query(
-      `SELECT c.id
-       FROM conversations c
-       JOIN conversation_members a ON a.conversation_id=c.id
-       JOIN conversation_members b ON b.conversation_id=c.id
-       WHERE c.type='direct'
-         AND a.user_id=$1
-         AND b.user_id=$2
-       LIMIT 1`,
-      [req.user.id,otherUserId]
-    );
-
-    if (existing.rows.length) {
-      return res.json({
-        success:true,
-        conversationId:existing.rows[0].id
-      });
-    }
-
-    const conversation = await query(
-      `INSERT INTO conversations(id,type,created_by)
-       VALUES($1,'direct',$2) RETURNING id`,
-      [uuidv4(),req.user.id]
-    );
-
-    const id = conversation.rows[0].id;
-
-    await query(
-      `INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1, $4, $2), ($5, $4, $3)`,
-      [id,req.user.id,otherUserId]
-    );
-
-    res.status(201).json({
-      success:true,
-      conversationId:id
-    });
-
-  } catch(err) {
-    next(err);
-  }
-});
-
 router.get('/chat/conversations',auth,async(req,res,next)=>{
   try {
     const result = await query(
