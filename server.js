@@ -3998,48 +3998,6 @@ app.post("/api/v1/messages/:id/read-v2", async (req, res) => {
 
 /* ---------- MESSAGES WITH STATUS FLAGS ---------- */
 
-app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
-  console.log("[MESSAGES-V2] start", req.params.id);
-  try {
-    const { query } = require("./src/db");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    console.log("[MESSAGES-V2] auth ok, user:", userId);
-
-    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [req.params.id, userId]);
-    // Bypassed strict member check for chat reliability
-
-    console.log("[MESSAGES-V2] member ok, querying messages");
-
-    const r = await query(
-      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.duration_ms, m.read_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 ORDER BY m.sent_at ASC LIMIT 200",
-      [req.params.id]
-    );
-
-    console.log("[MESSAGES-V2] got", r.rows.length, "messages");
-
-    // Auto-mark messages from OTHER users as delivered
-    try {
-      await query(
-        "UPDATE messages SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP) WHERE conversation_id=$1 AND sender_id != $2 AND delivered_at IS NULL",
-        [req.params.id, userId]
-      );
-    } catch (e) {
-      console.error("[MESSAGES-V2 delivered_at] ", e.message);
-    }
-
-    res.json({ success: true, messages: r.rows });
-  } catch (err) {
-    console.error("[MESSAGES-V2 ERROR]", err.message, err.stack);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 app.post("/api/v1/chat/conversations/:id/seen", async (req, res) => {
   try {
     const { query } = require("./src/db");
@@ -6141,48 +6099,6 @@ app.post("/api/v1/heartbeat", async (req, res) => {
 });
 
 /* [CHAT-SEND-MESSAGE-FIX] */
-app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const { v4: uuidv4 } = require("uuid");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    const conversationId = req.params.id;
-    const body = String(req.body.body || "").trim();
-    const mediaUrl = req.body.media_url || null;
-    const messageType = mediaUrl ? "image" : "text";
-
-    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_BODY_OR_MEDIA_REQUIRED" });
-
-    // Verify user is in the conversation
-    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
-    // Bypassed strict member check for chat reliability
-
-    const messageId = uuidv4();
-    
-    // Insert the message
-    await run(
-      "INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1, $2, $3, $4, $5, $6)",
-      [messageId, conversationId, userId, body, messageType, mediaUrl]
-    );
-
-    // Update the conversation's updated_at timestamp so it moves to the top
-    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
-
-    res.status(201).json({ success: true, messageId, body, media_url: mediaUrl, message_type: messageType });
-  } catch (err) {
-    console.error("[CHAT-SEND-MESSAGE]", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 /* [SMART-CHAT-SERVER-FIX] */
 // This route accepts EITHER a conversationId OR a userId in the :id parameter.
 app.get("/api/v1/chat/conversations/:id/messages-v3", async (req, res) => {
@@ -6303,85 +6219,6 @@ app.post("/api/v1/chat/conversations/:id/messages-v3", async (req, res) => {
 });
 
 /* [CHAT-FIX] Overriding v2 routes to accept User IDs or Conversation IDs */
-app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const { v4: uuidv4 } = require("uuid");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    const targetId = req.params.id;
-    let conversationId = targetId;
-
-    const isConv = await query("SELECT 1 FROM conversations WHERE id=$1 LIMIT 1", [targetId]);
-    if (!isConv.rows.length) {
-      const otherUserId = targetId;
-      const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, otherUserId]);
-      if (existing.rows.length) { conversationId = existing.rows[0].id; }
-      else {
-        conversationId = uuidv4();
-        await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
-        await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), otherUserId]);
-      }
-    }
-
-    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
-    // Bypassed strict member check for chat reliability
-
-    const r = await query("SELECT m.*, u.first_name, u.surname, u.username FROM messages m JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200", [conversationId]);
-    res.json({ success: true, conversationId: conversationId, messages: r.rows });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const { v4: uuidv4 } = require("uuid");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    const targetId = req.params.id;
-    let conversationId = targetId;
-
-    const isConv = await query("SELECT 1 FROM conversations WHERE id=$1 LIMIT 1", [targetId]);
-    if (!isConv.rows.length) {
-      const otherUserId = targetId;
-      const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, otherUserId]);
-      if (existing.rows.length) { conversationId = existing.rows[0].id; }
-      else {
-        conversationId = uuidv4();
-        await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
-        await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), otherUserId]);
-      }
-    }
-
-    const member = await query("SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2", [conversationId, userId]);
-    // Bypassed strict member check for chat reliability
-
-    const body = String(req.body.body || "").trim();
-    const mediaUrl = req.body.media_url || null;
-    const messageType = mediaUrl ? "image" : "text";
-
-    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_BODY_OR_MEDIA_REQUIRED" });
-
-    const messageId = uuidv4();
-    await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1, $2, $3, $4, $5, $6)", [messageId, conversationId, userId, body, messageType, mediaUrl]);
-    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
-
-    res.status(201).json({ success: true, messageId, conversationId });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
 /* [ULTIMATE-CHAT-FIX] Ignores everything Android sends and makes it work */
 const handleSmartChat = async (req, res) => {
   try {
@@ -6890,46 +6727,6 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
 });
 
 /* [MESSAGE-SEND-FINAL-FIX] */
-app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const { v4: uuidv4 } = require("uuid");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    let conversationId = req.params.id;
-    const isConv = await query("SELECT id FROM conversations WHERE id=$1 LIMIT 1", [conversationId]);
-    if (!isConv.rows.length) {
-      const isUser = await query("SELECT id FROM users WHERE id=$1 LIMIT 1", [conversationId]);
-      if (isUser.rows.length) {
-        const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, conversationId]);
-        if (existing.rows.length) { conversationId = existing.rows[0].id; }
-        else {
-          conversationId = uuidv4();
-          await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
-          await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), isUser.rows[0].id]);
-        }
-      } else { return res.status(404).json({ success: false, error: "INVALID_ID" }); }
-    }
-
-    const body = String(req.body.body || "").trim();
-    if (!body) return res.status(400).json({ success: false, error: "MESSAGE_EMPTY" });
-    
-    const messageId = uuidv4();
-    await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type) VALUES ($1,$2,$3,$4,'text')", [messageId, conversationId, userId, body]);
-    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
-    
-    res.status(201).json({ success: true, message: "Message sent", messageId: messageId, conversationId: conversationId });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 app.post("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
   try {
     const { query, run } = require("./src/db");
@@ -6960,49 +6757,6 @@ app.post("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
 });
 
 /* [MESSAGE-SEND-FINAL] */
-app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
-  try {
-    const { query, run } = require("./src/db");
-    const { v4: uuidv4 } = require("uuid");
-    const jwt = require("jsonwebtoken");
-    const envLocal = require("./src/config/env");
-    const authHeader = req.headers.authorization || "";
-    if (!authHeader.startsWith("Bearer ")) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
-    let userId = null;
-    try { const p = jwt.verify(authHeader.slice(7), envLocal.jwt.secret); userId = p.sub; }
-    catch (e) { return res.status(401).json({ success: false, error: "INVALID_SESSION" }); }
-
-    let conversationId = req.params.id;
-    const isConv = await query("SELECT id FROM conversations WHERE id=$1 LIMIT 1", [conversationId]);
-    if (!isConv.rows.length) {
-      const isUser = await query("SELECT id FROM users WHERE id=$1 LIMIT 1", [conversationId]);
-      if (isUser.rows.length) {
-        const existing = await query("SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id JOIN conversation_members b ON b.conversation_id=c.id WHERE a.user_id=$1 AND b.user_id=$2 LIMIT 1", [userId, conversationId]);
-        if (existing.rows.length) { conversationId = existing.rows[0].id; }
-        else {
-          conversationId = uuidv4();
-          await run("INSERT INTO conversations (id, type, created_by) VALUES ($1,'direct',$2)", [conversationId, userId]);
-          await run("INSERT INTO conversation_members (id, conversation_id, user_id) VALUES ($1,$2,$3),($4,$2,$5)", [uuidv4(), conversationId, userId, uuidv4(), isUser.rows[0].id]);
-        }
-      } else { return res.status(404).json({ success: false, error: "INVALID_ID" }); }
-    }
-
-    const body = String(req.body.body || "").trim();
-    const mediaUrl = req.body.media_url || null;
-    const messageType = mediaUrl ? "image" : "text";
-    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "MESSAGE_EMPTY" });
-
-    const messageId = uuidv4();
-    await run("INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url) VALUES ($1,$2,$3,$4,$5,$6)", [messageId, conversationId, userId, body, messageType, mediaUrl]);
-    await run("UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=$1", [conversationId]);
-
-    return res.status(201).json({ success: true, message: "Message sent", messageId: messageId, conversationId: conversationId });
-  } catch (err) {
-    console.error("[MESSAGE-SEND-FINAL]", err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 /* [POST-CREATION-WITH-MODERATION] */
 app.post("/api/v1/posts", async (req, res) => {
   try {
@@ -7299,6 +7053,87 @@ app.post("/api/v1/chat/conversations", async (req, res) => {
     return res.json({ success: true, conversationId: convId });
   } catch (err) {
     console.error("[CHAT-FIX-UNCAUGHT]", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* [SEND-FIX] */
+const __sendAuth = (h) => {
+  if (!h || !h.startsWith("Bearer ")) return null;
+  try {
+    const jwt = require("jsonwebtoken");
+    const envLocal = require("./src/config/env");
+    return jwt.verify(h.slice(7), envLocal.jwt.secret).sub;
+  } catch (_) { return null; }
+};
+
+app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
+  try {
+    const { query, run } = require("./src/db");
+    const { v4: uuidv4 } = require("uuid");
+
+    const me = __sendAuth(req.headers.authorization);
+    if (!me) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    const convId = req.params.id;
+    const body = String(req.body.body || "").trim();
+    const mediaUrl = req.body.media_url || null;
+    const msgType = mediaUrl ? "image" : "text";
+    if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "EMPTY_MESSAGE" });
+
+    const member = await query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2 LIMIT 1",
+      [convId, me]
+    );
+    if (!member.rows.length) {
+      return res.status(403).json({ success: false, error: "NOT_A_CONVERSATION_MEMBER" });
+    }
+
+    const messageId = uuidv4();
+    const nowIso = new Date().toISOString();
+    await run(
+      "INSERT INTO messages (id, conversation_id, sender_id, body, message_type, media_url, sent_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [messageId, convId, me, body, msgType, mediaUrl, nowIso]
+    );
+    await run(
+      "UPDATE conversations SET updated_at=$1 WHERE id=$2",
+      [nowIso, convId]
+    );
+
+    return res.status(201).json({
+      success: true,
+      messageId,
+      conversationId: convId,
+      body,
+      media_url: mediaUrl,
+      message_type: msgType,
+      sent_at: nowIso
+    });
+  } catch (err) {
+    console.error("[SEND-FIX-UNCAUGHT]", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
+  try {
+    const { query } = require("./src/db");
+    const me = __sendAuth(req.headers.authorization);
+    if (!me) return res.status(401).json({ success: false, error: "AUTH_REQUIRED" });
+
+    const member = await query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2 LIMIT 1",
+      [req.params.id, me]
+    );
+    if (!member.rows.length) return res.status(403).json({ success: false, error: "NOT_A_CONVERSATION_MEMBER" });
+
+    const r = await query(
+      "SELECT m.id, m.body, m.message_type, m.sender_id, m.sent_at, m.edited_at, m.deleted_at, m.media_url, m.read_at, m.delivered_at, u.username, u.first_name, u.surname, u.profile_photo_media_id FROM messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sent_at ASC LIMIT 200",
+      [req.params.id]
+    );
+    return res.json({ success: true, messages: r.rows });
+  } catch (err) {
+    console.error("[SEND-FIX-GET-UNCAUGHT]", err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
