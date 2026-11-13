@@ -6494,7 +6494,14 @@ app.use(async (req, res, next) => {
 
 // 3. ENSURE PROFILE QUERY RETURNS is_online, last_seen, country, state
 // We wrap the existing getUser route to guarantee the fields are sent to Android
-const originalGetUser = app._router.stack.find(layer => layer.route && layer.route.path === "/api/v1/users/:id" && layer.route.methods.get);
+// Safe lookup: app._router may be undefined on newer Express versions
+const _router = app._router || app.router;
+const originalGetUser = _router && _router.stack
+  ? _router.stack.find(layer => layer.route && layer.route.path === "/api/v1/users/:id" && layer.route.methods && layer.route.methods.get)
+  : undefined;
+if (!originalGetUser) {
+  console.warn("[PATCH] /api/v1/users/:id GET route not found; skipping override");
+}
 if (originalGetUser) {
     // This is a fallback check. The actual fix is in the SQL, which we patch below.
 }
