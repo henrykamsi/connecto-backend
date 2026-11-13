@@ -51,7 +51,16 @@ router.post("/", async (req, res) => {
             if (r.ok) {
               const data = await r.json();
               const cats = data.results[0].categories || {};
-              if (cats["sexual"] || cats["sexual/minors"]) warningLabel = "NUDITY CONTENT (18+)";
+              
+let isHardBlocked = false;
+              const scores = data.results[0].category_scores || {};
+              if (cats["sexual"] || cats["sexual/minors"]) {
+                if (scores["sexual"] > 0.99) {
+                  isHardBlocked = true;
+                  return res.status(400).json({ success: false, error: "UPLOAD_BLOCKED: Explicit nudity detected" });
+                }
+                warningLabel = "NUDITY CONTENT (18+)";
+              }
               else if (cats["violence"] || cats["violence/graphic"]) warningLabel = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL";
               else if (cats["self-harm"]) warningLabel = "DO NOT TRY THIS";
               else if (cats["harassment"] || cats["hate"]) warningLabel = "INAPPROPRIATE CONTENT";
