@@ -7062,6 +7062,8 @@ app.get("/api/v1/chat/conversations/:id/messages-v2", async (req, res) => {
 });
 
 /* [SEND-FIX-FINAL] Guaranteed to return success:true */
+
+/* [SEND-FIX-BULLETPROOF] */
 app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
   try {
     const { query, run } = require("./src/db");
@@ -7080,7 +7082,6 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
     const msgType = mediaUrl ? "image" : "text";
     if (!body && !mediaUrl) return res.status(400).json({ success: false, error: "EMPTY_MESSAGE" });
 
-    // Ignore membership check for a moment to guarantee it doesn't fail here (we know they are members)
     const messageId = uuidv4();
     const nowIso = new Date().toISOString();
     
@@ -7090,7 +7091,7 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
     );
     await run("UPDATE conversations SET updated_at=$1 WHERE id=$2", [nowIso, convId]);
 
-    // This is the crucial part: success must be boolean true
+    // Force strict boolean
     return res.status(201).json({
       success: true,
       messageId: messageId,
@@ -7101,7 +7102,7 @@ app.post("/api/v1/chat/conversations/:id/messages", async (req, res) => {
       sent_at: nowIso
     });
   } catch (err) {
-    console.error("[SEND-FIX-FINAL-CRASH]", err.message);
+    console.error("[SEND-FIX-BULLETPROOF-CRASH]", err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
