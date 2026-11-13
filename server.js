@@ -313,6 +313,57 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
+
+/* [FORCE-MODERATION] Intercept POST /posts, moderate text, save warning label */
+app.use(async (req, res, next) => {
+  if (req.method !== "POST" || !req.path.endsWith("/posts")) return next();
+
+  const text = req.body.body || req.body.text;
+  if (!text || text.length < 3) return next();
+
+  try {
+    const keys = (process.env.OPENAI_API_KEYS || "").split(",").map(k => k.trim()).filter(Boolean);
+    if (keys.length === 0) return next();
+
+    const bodyPayload = JSON.stringify({
+      model: "omni-moderation-latest",
+      input: [{ type: "text", text: text }]
+    });
+
+    let warningLabel = null;
+    for (const key of keys) {
+      try {
+        const r = await fetch("https://api.openai.com/v1/moderations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+          body: bodyPayload
+        });
+        if (r.ok) {
+          const data = await r.json();
+          const result = data.results[0];
+          const cats = result.categories || {};
+          if (cats["sexual"] || cats["sexual/minors"]) warningLabel = "NUDITY CONTENT (18+)";
+          else if (cats["violence"] || cats["violence/graphic"]) warningLabel = "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL";
+          else if (cats["self-harm"]) warningLabel = "DO NOT TRY THIS";
+          else if (cats["harassment"] || cats["hate"]) warningLabel = "INAPPROPRIATE CONTENT";
+          break;
+        }
+      } catch (e) { console.warn("[FORCE-MOD-KEY-FAIL]", e.message); }
+    }
+
+    // Attach the label to the request so the route can save it
+    if (warningLabel) {
+      req.body.warning_label = warningLabel;
+      req.body.warning_label_style = "danger";
+      console.log("[FORCE-MODERATION] Detected bad text. Label:", warningLabel);
+    }
+  } catch (e) {
+    console.error("[FORCE-MODERATION-ERROR]", e.message);
+  }
+  next();
+});
+
+
 /* [TEMP-BYPASS-AUTH] */
 app.use((req, res, next) => {
   if (req.path === "/api/v1/feed/smart" || req.path === "/api/v1/feed") {
@@ -3220,7 +3271,7 @@ app.post("/api/v1/organizations/:id/post", async (req, res) => {
 
     const postId = uuidv4();
     await run(
-      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled) VALUES ($1,$2,$3,'public',1,1)",
+      "INSERT INTO posts (id, author_id, text, audience, comments_enabled, share_enabled, warning_label, warning_label_style) VALUES (id, author_id, text, audience, comments_enabled, share_enabled,$1,$2,$3,'public',1,1,$3,'public',1,1, $8, $9)",
       [postId, userId, text]
     );
 
