@@ -6658,55 +6658,6 @@ async function callOpenAI(text, base64Image) {
 }
 
 // 1. PRE-CHECK ENDPOINT (Called before upload)
-app.post("/api/v1/moderate-content", async (req, res) => {
-  try {
-    const { text, image_base64 } = req.body;
-    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
-
-    const scan = await callOpenAI(text, image_base64);
-    if (!scan.success) return res.json({ success: true, action: "ALLOW", label: null, score: 0 });
-
-    const cats = scan.result.categories || {};
-    const scores = scan.result.category_scores || {};
-    const maxScore = Math.max(...Object.values(scores));
-    const labels = [];
-
-    // Determine Labels
-    if (cats["sexual"] || cats["sexual/minors"]) {
-      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", score: maxScore });
-      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
-    }
-    if (cats["violence/graphic"] || cats["violence"]) {
-      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
-    }
-    if (cats["self-harm"]) {
-      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
-    }
-    if (cats["harassment"] || cats["hate"]) {
-      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing multiple types of inappropriate content." });
-    }
-    // Horror logic (using OpenAI's generic fear/disturbing signals if available, else default)
-    if (cats["violence/graphic"] && maxScore > 0.8) {
-       labels.push({ text: "HORROR OR SCARY CONTENT FOR KIDS", reason: "This post contains scary or horror-themed content that may not be suitable for young children." });
-    }
-
-    let finalLabel = null;
-    let finalReason = null;
-    if (labels.length > 1) {
-      finalLabel = "INAPPROPRIATE CONTENT";
-      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
-    } else if (labels.length === 1) {
-      finalLabel = labels[0].text;
-      finalReason = labels[0].reason;
-    }
-
-    res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
-
-  } catch (e) {
-    console.error("[MODERATION] Error:", e.message);
-    res.json({ success: true, action: "ALLOW", label: null, score: 0 }); // Fail-safe
-  }
-});
 
 // 2. GET WARNINGS ENDPOINT
 app.get("/api/v1/moderation/warnings", async (req, res) => {
@@ -7172,58 +7123,6 @@ async function callOpenAIForModeration(text, base64Image) {
   return { ok: false, reason: "ALL_KEYS_FAILED" };
 }
 
-app.post("/api/v1/moderate-content", async (req, res) => {
-  try {
-    const { text, image_base64 } = req.body || {};
-    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
-
-    const scan = await callOpenAIForModeration(text, image_base64);
-    if (!scan.ok) {
-      return res.json({ success: true, action: "SYSTEM CHECKING", label: "SYSTEM CHECKING", reason: "Content moderation is currently unavailable. Please allow up to 48 hours for review.", score: 0 });
-    }
-
-    const cats = scan.result.categories || {};
-    const scores = scan.result.category_scores || {};
-    let maxScore = 0;
-    Object.keys(scores).forEach(function(k){ if (scores[k] > maxScore) maxScore = scores[k]; });
-
-    const labels = [];
-
-    if (cats["sexual"] || cats["sexual/minors"]) {
-      if (maxScore > 0.99) {
-        return res.json({ success: true, action: "BLOCK", label: "NUDITY CONTENT (18+)", reason: "This cannot be uploaded due to sexual or adult content.", score: maxScore });
-      }
-      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
-    }
-    if (cats["violence"] || cats["violence/graphic"]) {
-      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
-    }
-    if (cats["self-harm"] || cats["self-harm/intent"] || cats["self-harm/instructions"]) {
-      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
-    }
-    if (cats["harassment"] || cats["hate"]) {
-      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing inappropriate content." });
-    }
-
-    if (labels.length === 0) {
-      return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: maxScore });
-    }
-
-    let finalLabel, finalReason;
-    if (labels.length > 1) {
-      finalLabel = "INAPPROPRIATE CONTENT";
-      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
-    } else {
-      finalLabel = labels[0].text;
-      finalReason = labels[0].reason;
-    }
-
-    return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
-  } catch (err) {
-    console.error("[MODERATE-CONTENT]", err);
-    return res.json({ success: true, action: "SYSTEM CHECKING", label: "SYSTEM CHECKING", reason: "Content moderation is currently unavailable. Please allow up to 48 hours for review.", score: 0 });
-  }
-});
 
 /* [MODERATE-CONTENT-ENDPOINT] */
 function getOpenAiKeys() {
@@ -7264,61 +7163,10 @@ async function callOpenAI(text, base64Image) {
   return { success: false, error: "ALL_KEYS_FAILED" };
 }
 
-app.post("/api/v1/moderate-content", async (req, res) => {
-  try {
-    const { text, image_base64 } = req.body || {};
-    if (!text && !image_base64) return res.status(400).json({ success: false, error: "NOTHING_TO_SCAN" });
-
-    const scan = await callOpenAI(text, image_base64);
-    if (!scan.success) {
-      return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: 0 });
-    }
-    if (!scan.result) {
-      return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: 0 });
-    }
-
-    const cats = scan.result.categories || {};
-    const scores = scan.result.category_scores || {};
-    const maxScore = Math.max.apply(null, Object.values(scores).concat([0]));
-    const labels = [];
-
-    if (cats["sexual"] || cats["sexual/minors"]) {
-      if (maxScore > 0.99) {
-        return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", reason: "Sexual or adult content detected.", score: maxScore });
-      }
-      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
-    }
-    if (cats["violence/graphic"] || cats["violence"]) {
-      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
-    }
-    if (cats["self-harm"]) {
-      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
-    }
-    if (cats["harassment"] || cats["hate"]) {
-      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing inappropriate content." });
-    }
-
-    let finalLabel = null;
-    let finalReason = null;
-    if (labels.length > 1) {
-      finalLabel = "INAPPROPRIATE CONTENT";
-      finalReason = "This post has been flagged for containing multiple types of inappropriate content.";
-    } else if (labels.length === 1) {
-      finalLabel = labels[0].text;
-      finalReason = labels[0].reason;
-    }
-
-    if (finalLabel) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: finalLabel, reason: finalReason, score: maxScore });
-    }
-    return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: maxScore });
-  } catch (err) {
-    console.error("[MODERATE-CONTENT]", err);
-    return res.json({ success: true, action: "ALLOW", label: null, reason: null, score: 0 });
-  }
-});
 
 /* [MODERATION-ROUTE-FIX] */
+
+/* [MODERATION-ENDPOINT-FINAL] */
 app.post("/api/v1/moderate-content", async (req, res) => {
   try {
     const { text, image_base64 } = req.body || {};
@@ -7330,7 +7178,6 @@ app.post("/api/v1/moderate-content", async (req, res) => {
       .split(",").map(k => k.trim()).filter(k => k.length > 0);
 
     if (keys.length === 0) {
-      console.log("[MODERATION] No OpenAI key found, returning SYSTEM CHECKING");
       return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed. Our moderation system can take up to 48 hours. Please do not panic." });
     }
 
@@ -7350,16 +7197,12 @@ app.post("/api/v1/moderate-content", async (req, res) => {
           const data = await resp.json();
           result = data.results[0];
           break;
-        } else {
-          console.warn("[MODERATION] Key failed with status:", resp.status);
         }
-      } catch (e) {
-        console.warn("[MODERATION] Key error:", e.message);
-      }
+      } catch (e) {}
     }
 
     if (!result) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed. Our moderation system can take up to 48 hours. Please do not panic." });
+      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed." });
     }
 
     const cats = result.categories || {};
@@ -7367,28 +7210,27 @@ app.post("/api/v1/moderate-content", async (req, res) => {
     const labels = [];
 
     if (cats["sexual"] || cats["sexual/minors"]) {
-      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", reason: "This cannot be uploaded due to sexual, adult, or inappropriate content." });
-      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content. It is restricted to adults (18+) only." });
+      if (maxScore > 0.99) return res.json({ success: true, action: "BLOCK", label: "UPLOAD_BLOCKED", reason: "This cannot be uploaded due to inappropriate content." });
+      labels.push({ text: "NUDITY CONTENT (18+)", reason: "This post contains nudity or sexual content." });
     }
     if (cats["violence/graphic"] || cats["violence"]) {
-      labels.push({ text: "OBJECTS IN THIS VIDEO MIGHT BE HARMFUL", reason: "This video contains weapons, sharp objects, or items that could cause harm. Please view with caution." });
+      labels.push({ text: "OBJECTS MIGHT BE HARMFUL", reason: "This video contains weapons or harmful objects." });
     }
     if (cats["self-harm"]) {
-      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior or actions that could lead to serious injury. Do not attempt to recreate this at home." });
+      labels.push({ text: "DO NOT TRY THIS", reason: "This video shows dangerous behavior." });
     }
     if (cats["harassment"] || cats["hate"]) {
-      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing inappropriate content." });
+      labels.push({ text: "INAPPROPRIATE CONTENT", reason: "This post contains inappropriate content." });
     }
 
     if (labels.length > 1) {
-      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "INAPPROPRIATE CONTENT", reason: "This post has been flagged for containing multiple types of inappropriate content." });
+      return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "INAPPROPRIATE CONTENT", reason: "Contains multiple types of inappropriate content." });
     } else if (labels.length === 1) {
       return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: labels[0].text, reason: labels[0].reason });
     } else {
       return res.json({ success: true, action: "ALLOW", label: null, reason: null });
     }
   } catch (err) {
-    console.error("[MODERATION]", err);
-    return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed. Please do not panic." });
+    return res.json({ success: true, action: "ALLOW_WITH_WARNING", label: "SYSTEM CHECKING", reason: "Content is still being processed." });
   }
 });
