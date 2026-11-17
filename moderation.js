@@ -84,6 +84,10 @@ let isHardBlocked = false;
       [postId, me, text || " ", visibility, commentsEnabled, shareEnabled, isAiContent, warningLabel, warningStyle]
     );
 
+    if (req.body.media_id) {
+      await run("UPDATE media SET post_id=$1, processing_status='ready', visibility='public' WHERE id=$2 AND owner_id=$3", [postId, req.body.media_id, me]);
+    }
+
     // 3. Attach the media explicitly
     if (mediaId) {
       await run("UPDATE media SET post_id=$1, processing_status='ready', visibility='public' WHERE id=$2 AND owner_id=$3", [postId, mediaId, me]);

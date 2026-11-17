@@ -1,0 +1,7 @@
+name = "connecto-cdn"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+B2_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
+B2_BUCKET = "connecto-media-prod"
