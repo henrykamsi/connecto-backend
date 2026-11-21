@@ -4295,6 +4295,8 @@ app.post("/api/v1/calls/webhook", express.raw({ type: 'application/json' }), asy
 /* [/AGORA-WEBHOOK] */
 
 app.use("/api/v1", v1);
+app.use("/api/v1", require("./feed-algorithm"));
+
 app.use("/control-api", controlRouter);
 
 /* [SHOP-ROUTES] */
