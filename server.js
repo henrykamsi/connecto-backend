@@ -312,6 +312,7 @@ app.use((req, res, next) => {
 })();
 
 app.use(express.json({ limit: "10mb" }));
+app.use("/api/v1/chat/live", require("./src/routes/chat-live")); /* [CHAT-LIVE] */
 
 
 /* [WARNINGS-FIX-FINAL] */
@@ -6827,7 +6828,7 @@ app.get("/api/v1/chat/conversations/v2", async (req, res) => {
         other_photo: row.other_photo,
         last_message: row.last_message,
         last_message_at: row.last_message_at,
-        other_presence: "offline"
+        other_presence: (require("./src/websocket/realtime").isOnline(row.other_user_id) ? "online" : "offline")
       };
     });
 
