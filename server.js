@@ -313,6 +313,8 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 app.use("/api/v1/chat/live", require("./src/routes/chat-live")); /* [CHAT-LIVE] */
+app.use("/api/v1/moderation", require("./src/routes/content-safety").router); /* [CONTENT-SAFETY] */
+app.post("/api/v1/posts", require("./src/routes/content-safety").highlightMiddleware); /* [HIGHLIGHT] */
 
 
 /* [WARNINGS-FIX-FINAL] */
