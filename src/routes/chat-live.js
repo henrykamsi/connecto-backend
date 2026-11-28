@@ -287,6 +287,25 @@ router.get('/presence/:userId', authUser, async (req, res) => {
   }
 });
 
+/* ---- presence for many people at once (Friends list) ---- */
+router.post('/presence-batch', authUser, async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body && req.body.userIds)
+      ? Array.from(new Set(req.body.userIds.map(String))).slice(0, 100) : [];
+    if (!ids.length) return res.json({ success: true, presence: {} });
+    const marks = ids.map((_, i) => '$' + (i + 1)).join(',');
+    let rows = [];
+    try { rows = (await query(`SELECT id, last_seen FROM users WHERE id IN (${marks})`, ids)).rows; } catch (_) { }
+    const seen = {};
+    rows.forEach(r => { seen[String(r.id)] = toIso(r.last_seen); });
+    const presence = {};
+    for (const id of ids) presence[id] = { online: realtime.isOnline(id), last_seen: seen[id] || null };
+    return res.json({ success: true, presence });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 /* ---- who is on the other side of this conversation + their presence ---- */
 router.get('/conversation/:convId/presence', authUser, async (req, res) => {
   try {
