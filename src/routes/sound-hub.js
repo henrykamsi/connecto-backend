@@ -68,27 +68,31 @@ async function signMusicUrl(u) {
   } catch (_) { return String(u); }
 }
 
+async function userRow(id) {
+  if (!id) return {};
+  try { const r = await query('SELECT * FROM users WHERE id=$1 LIMIT 1', [id]); return r.rows[0] || {}; } catch (_) { return {}; }
+}
+
 /** Everything the app needs to show one sound. null when it does not exist. */
 async function resolveSound(soundId) {
   if (!soundId) return null;
   if (soundId.startsWith('orig_')) {
     const postId = soundId.slice(5);
-    const r = await query(
-      `SELECT p.id, p.author_id, u.first_name, u.name, u.surname, u.username, u.profile_photo_media_id
-         FROM posts p JOIN users u ON u.id = p.author_id WHERE p.id=$1 LIMIT 1`, [postId]);
+    const r = await query('SELECT * FROM posts WHERE id=$1 LIMIT 1', [postId]);
     if (!r.rows.length) return null;
-    const o = r.rows[0];
+    const authorId = r.rows[0].author_id || r.rows[0].user_id;
+    const o = await userRow(authorId);
     return { id: soundId, title: 'Original sound', artist: displayName(o), cover_url: await photoUrl(o.profile_photo_media_id),
-             is_original: true, owner_id: String(o.author_id), source_post_id: postId };
+             is_original: true, owner_id: authorId ? String(authorId) : null, source_post_id: postId };
   }
-  const r = await query(
-    `SELECT s.*, u.first_name, u.name AS uname, u.surname, u.username, u.profile_photo_media_id
-       FROM sounds s LEFT JOIN users u ON u.id = s.user_id WHERE s.id=$1 LIMIT 1`, [soundId]);
+  const r = await query('SELECT * FROM sounds WHERE id=$1 LIMIT 1', [soundId]);
   if (!r.rows.length) return null;
   const s = r.rows[0];
-  const cover = (await signMusicUrl(s.cover_art_url)) || await photoUrl(s.profile_photo_media_id);
-  return { id: String(s.id), title: s.title || 'Untitled', artist: s.artist_name || displayName({ first_name: s.first_name, name: s.uname, surname: s.surname, username: s.username }),
-           cover_url: cover || null, is_original: false, owner_id: s.user_id ? String(s.user_id) : null, audio_url: await signMusicUrl(s.audio_url) };
+  const ownerId = s.user_id || s.creator_user_id || null;
+  const o = await userRow(ownerId);
+  const cover = (await signMusicUrl(s.cover_art_url)) || await photoUrl(o.profile_photo_media_id);
+  return { id: String(s.id), title: s.title || s.name || 'Untitled', artist: s.artist_name || displayName(o),
+           cover_url: cover || null, is_original: false, owner_id: ownerId ? String(ownerId) : null, audio_url: await signMusicUrl(s.audio_url) };
 }
 
 async function countUses(soundId) {
@@ -137,24 +141,21 @@ router.get('/:soundId', async (req, res) => {
   try {
     const sound = await resolveSound(String(req.params.soundId));
     if (!sound) return res.status(404).json({ success: false, error: 'SOUND_NOT_FOUND' });
-    const u = await query(
-      `SELECT su.post_id, su.user_id, su.created_at, us.first_name, us.name AS uname, us.surname, us.username
-         FROM sound_uses su LEFT JOIN users us ON us.id = su.user_id
-        WHERE su.sound_id=$1 ORDER BY su.rowid ASC LIMIT 200`, [sound.id]);
+    const u = await query('SELECT post_id, user_id, created_at FROM sound_uses WHERE sound_id=$1 ORDER BY rowid ASC LIMIT 200', [sound.id]);
     const uses = [];
+    const names = {};
     let position = 0;
     for (const row of u.rows) {
       position++;
+      const uid = String(row.user_id);
+      if (!(uid in names)) names[uid] = displayName(await userRow(uid));
       let mediaUrl = null, mediaType = null;
       try {
         const m = await query('SELECT storage_key, type FROM media WHERE post_id=$1 AND deleted_at IS NULL ORDER BY rowid ASC LIMIT 1', [row.post_id]);
         if (m.rows.length) { mediaUrl = await signedFromKey(m.rows[0].storage_key); mediaType = m.rows[0].type; }
       } catch (_) { }
-      uses.push({
-        position, is_original: position === 1, post_id: row.post_id, user_id: String(row.user_id),
-        author_name: displayName({ first_name: row.first_name, name: row.uname, surname: row.surname, username: row.username }),
-        media_url: mediaUrl, media_type: mediaType, created_at: row.created_at
-      });
+      uses.push({ position, is_original: position === 1, post_id: row.post_id, user_id: uid, author_name: names[uid],
+                  media_url: mediaUrl, media_type: mediaType, created_at: row.created_at });
     }
     sound.use_count = uses.length;
     return res.json({ success: true, sound, uses });
@@ -169,9 +170,9 @@ router.post('/attach', auth, async (req, res) => {
     let soundId = req.body && req.body.soundId ? String(req.body.soundId) : null;
     if (!postId) return res.status(400).json({ success: false, error: 'POST_REQUIRED' });
 
-    const p = await query('SELECT author_id FROM posts WHERE id=$1 LIMIT 1', [postId]);
+    const p = await query('SELECT * FROM posts WHERE id=$1 LIMIT 1', [postId]);
     if (!p.rows.length) return res.status(404).json({ success: false, error: 'POST_NOT_FOUND' });
-    if (String(p.rows[0].author_id) !== req.userId) return res.status(403).json({ success: false, error: 'NOT_YOUR_POST' });
+    if (String(p.rows[0].author_id || p.rows[0].user_id) !== req.userId) return res.status(403).json({ success: false, error: 'NOT_YOUR_POST' });
 
     if (!soundId) {
       if (!isVideo) return res.json({ success: true, sound: null });   // photos / text have no sound
@@ -205,7 +206,8 @@ function musicS3() {
     bucket,
     host: endpoint.replace(/^https?:\/\//, ''),
     client: new S3Client({ region: process.env.MUSIC_B2_REGION || 'us-east-005', endpoint,
-                           credentials: { accessKeyId: id, secretAccessKey: key } })
+                           credentials: { accessKeyId: id, secretAccessKey: key },
+                           requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' })
   };
   return s3cache;
 }
