@@ -53,6 +53,21 @@ async function photoUrl(mediaId) {
 }
 const displayName = u => [u.first_name || u.name, u.surname].filter(Boolean).join(' ') || u.username || 'Someone';
 
+/** The music bucket is PRIVATE: turn a stored music link into a temporary signed link (24 h). Other links pass through. */
+async function signMusicUrl(u) {
+  if (!u) return null;
+  const m = musicS3();
+  if (!m) return String(u);
+  const prefix = `https://${m.bucket}.${m.host}/`;
+  if (!String(u).startsWith(prefix)) return String(u);
+  try {
+    const { GetObjectCommand } = require('@aws-sdk/client-s3');
+    const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+    const key = decodeURIComponent(String(u).slice(prefix.length).split('?')[0]);
+    return await getSignedUrl(m.client, new GetObjectCommand({ Bucket: m.bucket, Key: key }), { expiresIn: 86400 });
+  } catch (_) { return String(u); }
+}
+
 /** Everything the app needs to show one sound. null when it does not exist. */
 async function resolveSound(soundId) {
   if (!soundId) return null;
@@ -71,9 +86,9 @@ async function resolveSound(soundId) {
        FROM sounds s LEFT JOIN users u ON u.id = s.user_id WHERE s.id=$1 LIMIT 1`, [soundId]);
   if (!r.rows.length) return null;
   const s = r.rows[0];
-  const cover = s.cover_art_url || await photoUrl(s.profile_photo_media_id);
+  const cover = (await signMusicUrl(s.cover_art_url)) || await photoUrl(s.profile_photo_media_id);
   return { id: String(s.id), title: s.title || 'Untitled', artist: s.artist_name || displayName({ first_name: s.first_name, name: s.uname, surname: s.surname, username: s.username }),
-           cover_url: cover || null, is_original: false, owner_id: s.user_id ? String(s.user_id) : null, audio_url: s.audio_url || null };
+           cover_url: cover || null, is_original: false, owner_id: s.user_id ? String(s.user_id) : null, audio_url: await signMusicUrl(s.audio_url) };
 }
 
 async function countUses(soundId) {
@@ -107,6 +122,14 @@ router.get('/audio/:soundId', async (req, res) => {
     }
     if (!url) return res.status(404).json({ success: false, error: 'NO_AUDIO' });
     return res.redirect(302, url);
+  } catch (e) { return res.status(500).json({ success: false, error: e.message }); }
+});
+
+router.get('/cover/:soundId', async (req, res) => {
+  try {
+    const sound = await resolveSound(String(req.params.soundId));
+    if (!sound || !sound.cover_url) return res.status(404).json({ success: false, error: 'NO_COVER' });
+    return res.redirect(302, sound.cover_url);
   } catch (e) { return res.status(500).json({ success: false, error: e.message }); }
 });
 
@@ -235,11 +258,10 @@ router.post('/complete', auth, async (req, res) => {
     if (!audioUrl.startsWith(prefix + 'songs/') || (coverUrl && !coverUrl.startsWith(prefix + 'covers/'))) {
       return res.status(400).json({ success: false, error: 'INVALID_URL' });
     }
-    // make sure the file really arrived
+    // make sure the file really arrived (works with a private bucket)
     try {
-      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 8000);
-      const head = await fetch(audioUrl, { method: 'HEAD', signal: ctl.signal }); clearTimeout(t);
-      if (!head.ok) return res.status(400).json({ success: false, error: 'UPLOAD_NOT_FOUND' });
+      const { HeadObjectCommand } = require('@aws-sdk/client-s3');
+      await m.client.send(new HeadObjectCommand({ Bucket: m.bucket, Key: audioUrl.slice(prefix.length) }));
     } catch (_) { return res.status(400).json({ success: false, error: 'UPLOAD_NOT_FOUND' }); }
 
     await run('INSERT INTO sounds (id, user_id, title, artist_name, audio_url, cover_art_url) VALUES ($1,$2,$3,$4,$5,$6)',
